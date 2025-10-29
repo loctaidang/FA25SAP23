@@ -27,6 +27,7 @@ CLASS lcl_alv_handler DEFINITION DEFERRED.
 
 DATA: gv_toolbar_mode TYPE c LENGTH 1 VALUE 'D'. " 'D' = display, 'E' = edit
 
+
 "––– Dữ liệu động (itab) cho mọi bảng
 DATA: gr_data TYPE REF TO data.
 FIELD-SYMBOLS: <gt_data> TYPE STANDARD TABLE,
@@ -97,6 +98,13 @@ DATA: gv_can_create  TYPE abap_bool,
       gv_can_change  TYPE abap_bool,
       gv_can_delete  TYPE abap_bool,
       gv_can_display TYPE abap_bool.
+DATA gt_added_audit_fields TYPE TABLE OF fieldname WITH EMPTY KEY.
+DATA gt_tb_excl TYPE ui_functions.
+
+TYPES: ty_keyhash TYPE string.
+DATA: gt_changed_existing_keys TYPE HASHED TABLE OF ty_keyhash WITH UNIQUE KEY table_line.
+DATA gv_in_upload TYPE abap_bool VALUE abap_false.
+
 
 
 "===== INCLUDE ZFA25SAP23_SEL =====
@@ -108,43 +116,58 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
     p_maxrow TYPE i DEFAULT 200.
 SELECTION-SCREEN END OF BLOCK b1.
 
+" F4 cho tên bảng
 AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_tab.
   PERFORM f4_tabname.
 
-  " Validate cơ bản
-
+" Kiểm tra hợp lệ khi người dùng nhấn Execute
 AT SELECTION-SCREEN.
-  " p_maxrow > 0
-  IF p_maxrow IS INITIAL OR p_maxrow <= 0.
-    MESSAGE e398(00) WITH 'p_maxrow phải > 0'.
+  PERFORM validate_tab.
+  PERFORM validate_maxrow.
+
+"Validate bảng
+FORM validate_tab.
+  " Chưa nhập
+  IF p_tab IS INITIAL.
+    MESSAGE e398(00) WITH 'Bạn chưa nhập p_tab'.
   ENDIF.
 
-  " p_tab là bảng Z* transparent và active trong DDIC
+  " Bảng phải là Z*, transparent, active
   SELECT SINGLE tabname
-  FROM dd02l
-  INTO @DATA(lv_tab)
-  WHERE tabname = @p_tab
-  AND tabclass = 'TRANSP'
-  AND as4local = 'A'
-  AND tabname LIKE 'Z%'.
+    FROM dd02l
+    INTO @DATA(lv_tab)
+    WHERE tabname  = @p_tab
+      AND tabclass = 'TRANSP'
+      AND as4local = 'A'
+      AND tabname  LIKE 'Z%'.
+
   IF sy-subrc <> 0.
     MESSAGE e398(00) WITH |Bảng { p_tab } không hợp lệ (chỉ Z* active).|.
   ENDIF.
+ENDFORM.
 
-  "----------------- Subroutines -----------------
+"Validate p_maxrow
+FORM validate_maxrow.
+  IF p_maxrow IS INITIAL OR p_maxrow <= 0.
+    MESSAGE e398(00) WITH 'p_maxrow phải > 0'.
+  ENDIF.
+ENDFORM.
 
+" Subroutine: F4 chọn bảng Z* active
 FORM f4_tabname.
-  TYPES: BEGIN OF ty_tab, tabname TYPE dd02l-tabname, END OF ty_tab.
+  TYPES: BEGIN OF ty_tab,
+           tabname TYPE dd02l-tabname,
+         END OF ty_tab.
   DATA: lt_tabs TYPE STANDARD TABLE OF ty_tab,
         lt_ret  TYPE TABLE OF ddshretval.
 
   SELECT tabname
-  FROM dd02l
-  INTO TABLE lt_tabs
-  WHERE tabname LIKE 'Z%'
-  AND tabclass = 'TRANSP'
-  AND as4local = 'A'
-  ORDER BY tabname.
+    FROM dd02l
+    INTO TABLE lt_tabs
+    WHERE tabname LIKE 'Z%'
+      AND tabclass = 'TRANSP'
+      AND as4local = 'A'
+    ORDER BY tabname.
 
   CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
     EXPORTING
@@ -168,6 +191,8 @@ FORM f4_tabname.
     ENDIF.
   ENDIF.
 ENDFORM.
+
+
 
 
 *----------------------------------------------------------------------*
@@ -212,6 +237,9 @@ FORM has_actvt USING iv_act TYPE activ_auth CHANGING ev_ok TYPE abap_bool.
     ev_ok = abap_true.
   ENDIF.
 ENDFORM.
+
+
+
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_DDIC
@@ -679,10 +707,10 @@ FORM enable_f4_in_fieldcat .
       CONTINUE.
     ENDIF.
 
-    " Mặc định
+    " Mặc định tắt F4
     <fc>-f4availabl = abap_false.
 
-    " Key?
+    " Xác định có phải khóa?
     DATA(lv_is_key) = abap_false.
     READ TABLE gt_key_fields WITH KEY table_line = <fc>-fieldname TRANSPORTING NO FIELDS.
     IF sy-subrc = 0. lv_is_key = abap_true. ENDIF.
@@ -690,46 +718,39 @@ FORM enable_f4_in_fieldcat .
     CLEAR ls_meta.
     READ TABLE lt_meta INTO ls_meta WITH KEY fieldname = <fc>-fieldname.
 
-    " --- Ưu tiên SH/FK ---
+    " 1) Ưu tiên SH/FK
     IF sy-subrc = 0 AND ( ls_meta-f4availabl = 'X' OR ls_meta-checktable IS NOT INITIAL ).
       <fc>-f4availabl = abap_true.
     ELSE.
-      " --- Loại trừ các kiểu không nên bật F4 ---
+      " 2) Loại trừ kiểu không nên F4
       DATA(lv_is_disallowed) = abap_false.
       IF ls_meta-datatype = 'DATS' OR ls_meta-datatype = 'TIMS'.
         lv_is_disallowed = abap_true.
       ENDIF.
-      " QUAN/CURR (số lượng/tiền tệ) hoặc có ref field
       IF ls_meta-datatype = 'QUAN' OR ls_meta-datatype = 'CURR'
          OR ls_meta-reffield  IS NOT INITIAL OR ls_meta-reftable IS NOT INITIAL.
         lv_is_disallowed = abap_true.
       ENDIF.
 
-      " --- Cho phép "fallback-only" ---
+      " 3) Fallback chỉ cho non-key & không bị disallow
       IF lv_is_key = abap_false AND lv_is_disallowed = abap_false.
-        " Kiểu text hoặc số "tự do": CHAR/STRG/NUMC/DEC/INT/FLTP/packed…
-        IF ls_meta-inttype = 'C'  OR ls_meta-inttype = 'N' OR   " CHAR/NUMC
-           ls_meta-inttype = 'P'  OR                            " DEC/packed
-           ls_meta-inttype = 'I'  OR                            " INT
-           ls_meta-inttype = 'F'.                               " FLTP
-          <fc>-f4availabl = abap_true.  " bật để kích hoạt onf4 → fallback từ ALV
-        ENDIF.
+        CASE ls_meta-inttype.
+          WHEN 'C' OR 'N' OR 'P' OR 'I' OR 'F'.
+            <fc>-f4availabl = abap_true.
+        ENDCASE.
       ENDIF.
     ENDIF.
 
-    " --- Whitelist/Blacklist (tuỳ chọn) ---
+    " 4) Whitelist / Blacklist
     READ TABLE gt_f4_whitelist WITH KEY table_line = <fc>-fieldname TRANSPORTING NO FIELDS.
     IF sy-subrc = 0. <fc>-f4availabl = abap_true. ENDIF.
 
     READ TABLE gt_f4_blacklist WITH KEY table_line = <fc>-fieldname TRANSPORTING NO FIELDS.
     IF sy-subrc = 0. <fc>-f4availabl = abap_false. ENDIF.
 
-    " Giữ logic edit sẵn có
-    IF <fc>-edit IS INITIAL.
-      <fc>-edit = abap_true.
-    ENDIF.
   ENDLOOP.
 ENDFORM.
+
 
 
 FORM register_f4_all .
@@ -804,6 +825,8 @@ FORM add_fc_tech_if_missing USING iv_field  TYPE lvc_fname
 ENDFORM.
 
 
+
+
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_ALV
 *&---------------------------------------------------------------------*
@@ -831,14 +854,16 @@ CLASS lcl_alv_handler IMPLEMENTATION.
 
   METHOD handle_toolbar.
     DATA: lt_toolbar     TYPE STANDARD TABLE OF stb_button,
-          lt_excl        TYPE TABLE OF syucomm,
           ls_btn         TYPE stb_button,
-          lv_code        TYPE syucomm,
-          lv_found       TYPE abap_bool,
           lv_can_create  TYPE abap_bool,
           lv_can_change  TYPE abap_bool,
           lv_can_delete  TYPE abap_bool,
-          lv_can_display TYPE abap_bool.
+          lv_can_display TYPE abap_bool,
+          lv_drop        TYPE abap_bool,
+          ix             TYPE sy-tabix.
+
+    FIELD-SYMBOLS: <b>  TYPE stb_button,
+                   <fc> LIKE LINE OF gt_tb_excl.
 
     PERFORM has_actvt USING '01' CHANGING lv_can_create.
     PERFORM has_actvt USING '02' CHANGING lv_can_change.
@@ -847,31 +872,42 @@ CLASS lcl_alv_handler IMPLEMENTATION.
 
     e_interactive = space.
 
-    " Loại bỏ nút chuẩn không dùng
-    REFRESH lt_excl.
-    APPEND 'INSR' TO lt_excl.
-    APPEND 'DELE' TO lt_excl.
-    APPEND 'COPY' TO lt_excl.
-    APPEND 'PASTE' TO lt_excl.
-    APPEND 'SCUT' TO lt_excl.
-    APPEND 'SALL' TO lt_excl.
-    APPEND 'PICK' TO lt_excl.
-
+    " Gỡ nút chuẩn (dựa trên gt_tb_excl đã build ở PBO)
     lt_toolbar = e_object->mt_toolbar[].
-    LOOP AT lt_toolbar ASSIGNING FIELD-SYMBOL(<fs_btn>).
-      CLEAR lv_found.
-      LOOP AT lt_excl INTO lv_code.
-        IF lv_code = <fs_btn>-function.
-          lv_found = abap_true.
+
+    LOOP AT lt_toolbar ASSIGNING <b>.
+      ix = sy-tabix.
+      lv_drop = abap_false.
+
+      LOOP AT gt_tb_excl ASSIGNING <fc>.
+        IF <b>-function = <fc>.
+          lv_drop = abap_true.
           EXIT.
         ENDIF.
       ENDLOOP.
-      IF lv_found = abap_true.
-        DELETE lt_toolbar INDEX sy-tabix.
+
+      " Fallback
+      IF lv_drop = abap_false AND (
+       <b>-function = 'INSR' OR
+       <b>-function = 'APND' OR
+       <b>-function = 'DUPL' OR
+       <b>-function = 'DELE' OR
+       <b>-function = 'COPY' OR
+       <b>-function = 'PASTE' OR
+       <b>-function = 'SCUT' OR
+       <b>-function = 'SALL' OR
+       <b>-function = 'PICK'
+     ).
+        lv_drop = abap_true.
+      ENDIF.
+
+      IF lv_drop = abap_true.
+        DELETE lt_toolbar INDEX ix.
       ENDIF.
     ENDLOOP.
 
-    "==== EVTG ====
+    "=== 2) Thêm các nút custom (EVTG, SAVE, ADD, DELE, UPLD, XLSX, TMPL, HIST)
+    "---- EVTG
     CLEAR ls_btn.
     ls_btn-function = 'EVTG'.
     IF gv_edit_md = abap_true.
@@ -883,471 +919,557 @@ CLASS lcl_alv_handler IMPLEMENTATION.
       ls_btn-icon      = icon_change.
       ls_btn-text      = 'Edit'.
       ls_btn-quickinfo = 'Switch to edit mode'.
-      IF lv_can_change = abap_true.
-        ls_btn-disabled = space.
-      ELSE.
-        ls_btn-disabled = 'X'.
-      ENDIF.
+      ls_btn-disabled  = COND #( WHEN lv_can_change = abap_true THEN space ELSE 'X' ).
     ENDIF.
     APPEND ls_btn TO lt_toolbar.
 
-    "==== SAVE ====
+    "---- SAVE
     CLEAR ls_btn.
-    ls_btn-function = 'SAVE'.
-    ls_btn-icon = icon_system_save.
-    ls_btn-text = 'Save'.
-    ls_btn-quickinfo = 'Save changes'.
-    IF gv_edit_md = abap_true AND lv_can_change = abap_true.
-      ls_btn-disabled = space.
-    ELSE.
-      ls_btn-disabled = 'X'.
-    ENDIF.
+    ls_btn-function   = 'SAVE'.
+    ls_btn-icon       = icon_system_save.
+    ls_btn-text       = 'Save'.
+    ls_btn-quickinfo  = 'Save changes'.
+    ls_btn-disabled   = COND #( WHEN gv_edit_md = abap_true AND lv_can_change = abap_true THEN space ELSE 'X' ).
     APPEND ls_btn TO lt_toolbar.
 
-    "==== ADD ====
+    "---- ADD
     CLEAR ls_btn.
-    ls_btn-function = 'ADD'.
-    ls_btn-icon = icon_create.
-    ls_btn-text = 'Add'.
-    ls_btn-quickinfo = 'Add new entry'.
-    IF gv_edit_md = abap_true AND lv_can_create = abap_true.
-      ls_btn-disabled = space.
-    ELSE.
-      ls_btn-disabled = 'X'.
-    ENDIF.
+    ls_btn-function   = 'ADD'.
+    ls_btn-icon       = icon_create.
+    ls_btn-text       = 'Add'.
+    ls_btn-quickinfo  = 'Add new entry'.
+    ls_btn-disabled   = COND #( WHEN gv_edit_md = abap_true AND lv_can_create = abap_true THEN space ELSE 'X' ).
     APPEND ls_btn TO lt_toolbar.
 
-    "==== DELETE ====
+    "---- DELE (nút custom của bạn, KHÁC mã chuẩn mc_fc_loc_delete_row)
     CLEAR ls_btn.
-    ls_btn-function = 'DELE'.
-    ls_btn-icon = icon_delete.
-    ls_btn-text = 'Delete'.
-    ls_btn-quickinfo = 'Delete selected entry'.
-    IF gv_edit_md = abap_true AND lv_can_delete = abap_true.
-      ls_btn-disabled = space.
-    ELSE.
-      ls_btn-disabled = 'X'.
-    ENDIF.
+    ls_btn-function   = 'DELE'.
+    ls_btn-icon       = icon_delete.
+    ls_btn-text       = 'Delete'.
+    ls_btn-quickinfo  = 'Delete selected entry'.
+    ls_btn-disabled   = COND #( WHEN gv_edit_md = abap_true AND lv_can_delete = abap_true THEN space ELSE 'X' ).
     APPEND ls_btn TO lt_toolbar.
 
-    "==== UPLOAD ====
+    "---- UPLD
     CLEAR ls_btn.
-    ls_btn-function = 'UPLD'.
-    ls_btn-icon = icon_import.
-    ls_btn-text = 'Upload Data'.
-    ls_btn-quickinfo = 'Upload from file'.
-    IF gv_edit_md = abap_true AND lv_can_change = abap_true.
-      ls_btn-disabled = space.
-    ELSE.
-      ls_btn-disabled = 'X'.
-    ENDIF.
+    ls_btn-function   = 'UPLD'.
+    ls_btn-icon       = icon_import.
+    ls_btn-text       = 'Upload Data'.
+    ls_btn-quickinfo  = 'Upload from file'.
+    ls_btn-disabled   = COND #( WHEN gv_edit_md = abap_true AND lv_can_change = abap_true THEN space ELSE 'X' ).
     APPEND ls_btn TO lt_toolbar.
 
-    "==== EXPORT (XLSX) ====
+    "---- XLSX
     CLEAR ls_btn.
-    ls_btn-function = 'XLSX'.
-    ls_btn-icon = icon_export.
-    ls_btn-text = 'Export Data'.
-    ls_btn-quickinfo = 'Export to Excel'.
-    IF lv_can_display = abap_true.
-      ls_btn-disabled = space.
-    ELSE.
-      ls_btn-disabled = 'X'.
-    ENDIF.
+    ls_btn-function   = 'XLSX'.
+    ls_btn-icon       = icon_export.
+    ls_btn-text       = 'Export Data'.
+    ls_btn-quickinfo  = 'Export to Excel'.
+    ls_btn-disabled   = COND #( WHEN lv_can_display = abap_true THEN space ELSE 'X' ).
     APPEND ls_btn TO lt_toolbar.
 
-    "==== TEMPLATE ====
+    "---- TMPL
     CLEAR ls_btn.
-    ls_btn-function = 'TMPL'.
-    ls_btn-icon = icon_export.
-    ls_btn-text = 'Export Template'.
-    ls_btn-quickinfo = 'Download template'.
-    IF lv_can_display = abap_true.
-      ls_btn-disabled = space.
-    ELSE.
-      ls_btn-disabled = 'X'.
-    ENDIF.
+    ls_btn-function   = 'TMPL'.
+    ls_btn-icon       = icon_export.
+    ls_btn-text       = 'Export Template'.
+    ls_btn-quickinfo  = 'Download template'.
+    ls_btn-disabled   = COND #( WHEN lv_can_display = abap_true THEN space ELSE 'X' ).
     APPEND ls_btn TO lt_toolbar.
 
-    "==== HISTORY ====
+    "---- HIST
     CLEAR ls_btn.
-    ls_btn-function = 'HIST'.
-    ls_btn-icon = icon_history.
-    ls_btn-text = 'History'.
-    ls_btn-quickinfo = 'View version history & rollback'.
-    IF lv_can_display = abap_true.
-      ls_btn-disabled = space.
-    ELSE.
-      ls_btn-disabled = 'X'.
-    ENDIF.
+    ls_btn-function   = 'HIST'.
+    ls_btn-icon       = icon_history.
+    ls_btn-text       = 'History'.
+    ls_btn-quickinfo  = 'View version history & rollback'.
+    ls_btn-disabled   = COND #( WHEN lv_can_display = abap_true THEN space ELSE 'X' ).
     APPEND ls_btn TO lt_toolbar.
 
     e_object->mt_toolbar[] = lt_toolbar.
   ENDMETHOD.
 
+METHOD handle_user_command.
+  DATA: ls_stbl               TYPE lvc_s_stbl,
+        lv_has_change         TYPE abap_bool,
+        lv_answer             TYPE c,
+        lv_new_incomplete     TYPE abap_bool,
+        lv_other_changes      TYPE abap_bool,
+        lv_ans_conf           TYPE c,
+        lv_question           TYPE c LENGTH 70,
+        lv_msg                TYPE c LENGTH 200,
+        lv_err                TYPE c LENGTH 200,
+        lv_skip_unsaved_check TYPE abap_bool VALUE abap_false,
+        lv_ok                 TYPE abap_bool.
 
-  METHOD handle_user_command.
-    DATA: ls_stbl               TYPE lvc_s_stbl,
-          lv_has_change         TYPE abap_bool,
-          lv_answer             TYPE c,
-          lv_new_incomplete     TYPE abap_bool,
-          lv_other_changes      TYPE abap_bool,
-          lv_ans_conf           TYPE c,
-          lv_question           TYPE c LENGTH 70,
-          lv_msg                TYPE c LENGTH 200,
-          lv_err                TYPE c LENGTH 200,
-          lv_skip_unsaved_check TYPE abap_bool VALUE abap_false,
-          lv_ok                 TYPE abap_bool.
+  " NEW: biết có lưu/huỷ thay đổi do popup hay không
+  DATA: lv_saved_by_prompt     TYPE abap_bool VALUE abap_false,
+        lv_discarded_by_prompt TYPE abap_bool VALUE abap_false.
 
-    FIELD-SYMBOLS:
-      <fs_tab>    TYPE STANDARD TABLE,
-      <fs_row>    TYPE any,
-      <fs_newrec> TYPE any,
-      <fs_erdat>  TYPE any,  <fs_ertim> TYPE any,  <fs_ernam> TYPE any.
+  " --- Local vars for EVTG pre-check (no inline) ---
+  DATA: lv_dup           TYPE abap_bool,
+        lv_dup_msg       TYPE string,             " nhận message string từ FORM
+        lv_off_idx       TYPE i,
+        lv_key_for_focus TYPE dd03l-fieldname.
 
-    CLEAR ls_stbl. ls_stbl-row = 'X'. ls_stbl-col = 'X'.
+  FIELD-SYMBOLS:
+    <fs_tab>    TYPE STANDARD TABLE,
+    <fs_row>    TYPE any,
+    <fs_newrec> TYPE any,
+    <fs_erdat>  TYPE any,  <fs_ertim> TYPE any,  <fs_ernam> TYPE any.
 
-    " Gom dữ liệu đang edit về itab trước
-    IF g_alv_grid IS BOUND.
-      TRY. g_alv_grid->check_changed_data( ). CATCH cx_root. ENDTRY.
-    ENDIF.
+  CLEAR ls_stbl. ls_stbl-row = 'X'. ls_stbl-col = 'X'.
 
-    IF e_ucomm = 'DELE' OR e_ucomm = 'ADD'.
-      lv_skip_unsaved_check = abap_true.
-    ENDIF.
+  " Gom dữ liệu đang edit về itab trước
+  IF g_alv_grid IS BOUND.
+    TRY. g_alv_grid->check_changed_data( ). CATCH cx_root. ENDTRY.
+  ENDIF.
 
-    "=== Kiểm tra thay đổi chưa lưu chi tiết (popup hướng dẫn) ===
-    DATA: lv_new_incomplete_cnt TYPE i,
-          lv_new_complete_cnt   TYPE i,
-          lv_edit_existing_cnt  TYPE i,
-          lv_ans                TYPE c,
-          lv_text               TYPE c LENGTH 200.
+  IF e_ucomm = 'DELE' OR e_ucomm = 'ADD'.
+    lv_skip_unsaved_check = abap_true.
+  ENDIF.
 
-    PERFORM analyze_change_state_detailed
-      CHANGING lv_has_change lv_new_incomplete_cnt lv_new_complete_cnt lv_edit_existing_cnt.
+  "=== Kiểm tra thay đổi chưa lưu chi tiết (popup hướng dẫn) ===
+  DATA: lv_new_incomplete_cnt TYPE i,
+        lv_new_complete_cnt   TYPE i,
+        lv_edit_existing_cnt  TYPE i,
+        lv_ans                TYPE c,
+        lv_text               TYPE c LENGTH 200.
 
-    IF e_ucomm <> 'SAVE'
-       AND lv_has_change = abap_true
-       AND lv_skip_unsaved_check <> abap_true.
+  PERFORM analyze_change_state_detailed
+    CHANGING lv_has_change lv_new_incomplete_cnt lv_new_complete_cnt lv_edit_existing_cnt.
 
-      IF     lv_new_incomplete_cnt > 0
-         AND lv_new_complete_cnt   = 0
-         AND lv_edit_existing_cnt  = 0.
+  IF e_ucomm <> 'SAVE'
+     AND lv_has_change = abap_true
+     AND lv_skip_unsaved_check <> abap_true.
 
-        lv_text = |Có | && lv_new_incomplete_cnt &&
-                  | dòng mới CHƯA NHẬP ĐỦ KHÓA. Bỏ dòng mới và tiếp tục?|.
-        CLEAR lv_ans.
-        CALL FUNCTION 'POPUP_TO_CONFIRM'
-          EXPORTING
-            titlebar              = 'Dòng mới thiếu khóa'
-            text_question         = lv_text
-            text_button_1         = 'Bỏ & tiếp tục'
-            text_button_2         = 'Quay lại'
-            default_button        = '2'
-            display_cancel_button = space
-          IMPORTING
-            answer                = lv_ans.
+    IF     lv_new_incomplete_cnt > 0
+       AND lv_new_complete_cnt   = 0
+       AND lv_edit_existing_cnt  = 0.
 
-        IF lv_ans = '1'.
-          " Người dùng chọn Bỏ & Tiếp tục → xóa newrec, có thể về view
-          PERFORM purge_incomplete_newrecs.
-          gv_add_mode = abap_false.
-          PERFORM apply_editability_and_push.
-          " Không RETURN: cho phép tiếp tục xử lý ucomm (ví dụ EVTG…)
-        ELSEIF lv_ans = '2'.
-          " Người dùng chọn Quay lại → GIỮ nguyên edit mode, focus ô khóa
-          PERFORM focus_key_on_newrec.
-          RETURN. " THOÁT TOÀN METHOD, KHÔNG CHẠY TIẾP
-        ENDIF.
+      lv_text = |Có | && lv_new_incomplete_cnt &&
+                | dòng mới CHƯA NHẬP ĐỦ KHÓA. Bỏ dòng mới và tiếp tục?|.
+      CLEAR lv_ans.
+      CALL FUNCTION 'POPUP_TO_CONFIRM'
+        EXPORTING
+          titlebar              = 'Dòng mới thiếu khóa'
+          text_question         = lv_text
+          text_button_1         = 'Bỏ & tiếp tục'
+          text_button_2         = 'Quay lại'
+          default_button        = '2'
+          display_cancel_button = space
+        IMPORTING
+          answer                = lv_ans.
 
-      ELSEIF lv_new_complete_cnt > 0
-         AND lv_edit_existing_cnt = 0
-         AND lv_new_incomplete_cnt = 0.
-
-        lv_text = |Có | && lv_new_complete_cnt &&
-                  | dòng mới CHƯA LƯU. Lưu trước khi tiếp tục?|.
-        CLEAR lv_ans.
-        CALL FUNCTION 'POPUP_TO_CONFIRM'
-          EXPORTING
-            titlebar              = 'Dòng mới chưa lưu'
-            text_question         = lv_text
-            text_button_1         = 'Lưu'
-            text_button_2         = 'Không lưu'
-            default_button        = '1'
-            display_cancel_button = 'X'
-          IMPORTING
-            answer                = lv_ans.
-        CASE lv_ans.
-          WHEN '1'. PERFORM on_save. IF gv_dirty = abap_true. RETURN. ENDIF.
-          WHEN 'A'. RETURN.
-          WHEN '2'. " Không lưu, vẫn tiếp tục
-        ENDCASE.
-
-      ELSEIF lv_edit_existing_cnt > 0
-         AND lv_new_incomplete_cnt = 0
-         AND lv_new_complete_cnt   = 0.
-
-        lv_text = 'Bạn đã sửa dữ liệu trên dòng hiện có. Lưu trước khi tiếp tục?'.
-        CLEAR lv_ans.
-        CALL FUNCTION 'POPUP_TO_CONFIRM'
-          EXPORTING
-            titlebar              = 'Thay đổi chưa lưu'
-            text_question         = lv_text
-            text_button_1         = 'Lưu'
-            text_button_2         = 'Không lưu'
-            default_button        = '1'
-            display_cancel_button = 'X'
-          IMPORTING
-            answer                = lv_ans.
-        CASE lv_ans.
-          WHEN '1'. PERFORM on_save. IF gv_dirty = abap_true. RETURN. ENDIF.
-          WHEN 'A'. RETURN.
-          WHEN '2'. PERFORM discard_unsaved_changes.
-        ENDCASE.
-
-      ELSE.
-        lv_text = |Có thay đổi chưa lưu: | &&
-                  lv_new_incomplete_cnt && ' NEWREC thiếu khóa, ' &&
-                  lv_new_complete_cnt   && ' NEWREC đủ khóa, ' &&
-                  lv_edit_existing_cnt  && ' thay đổi dòng cũ. Lưu trước khi tiếp tục?'.
-        CLEAR lv_ans.
-        CALL FUNCTION 'POPUP_TO_CONFIRM'
-          EXPORTING
-            titlebar              = 'Thay đổi chưa lưu'
-            text_question         = lv_text
-            text_button_1         = 'Lưu'
-            text_button_2         = 'Không lưu'
-            default_button        = '1'
-            display_cancel_button = 'X'
-          IMPORTING
-            answer                = lv_ans.
-        CASE lv_ans.
-          WHEN '1'. PERFORM on_save. IF gv_dirty = abap_true. RETURN. ENDIF.
-          WHEN 'A'. RETURN.
-          WHEN '2'. PERFORM discard_unsaved_changes.
-        ENDCASE.
+      IF lv_ans = '1'.
+        PERFORM purge_incomplete_newrecs.
+        gv_add_mode = abap_false.
+        PERFORM apply_editability_and_push.
+      ELSEIF lv_ans = '2'.
+        PERFORM focus_key_on_newrec.
+        RETURN.
       ENDIF.
 
+    ELSEIF lv_new_complete_cnt > 0
+       AND lv_edit_existing_cnt = 0
+       AND lv_new_incomplete_cnt = 0.
+
+      lv_text = |Có | && lv_new_complete_cnt &&
+                | dòng mới CHƯA LƯU. Lưu trước khi tiếp tục?|.
+      CLEAR lv_ans.
+      CALL FUNCTION 'POPUP_TO_CONFIRM'
+        EXPORTING
+          titlebar              = 'Dòng mới chưa lưu'
+          text_question         = lv_text
+          text_button_1         = 'Lưu'
+          text_button_2         = 'Không lưu'
+          default_button        = '1'
+          display_cancel_button = 'X'
+        IMPORTING
+          answer                = lv_ans.
+      CASE lv_ans.
+        WHEN '1'.
+          PERFORM on_save.
+          " Nếu lưu LỖI, on_save sẽ giữ ở Edit -> dừng
+          IF gv_edit_md = abap_true.
+            RETURN.
+          ELSE.
+            " Lưu OK -> đã ở View
+            lv_saved_by_prompt = abap_true.
+          ENDIF.
+        WHEN 'A'.
+          RETURN.
+        WHEN '2'.
+          " KHÔNG LƯU: bỏ toàn bộ thay đổi tạm (xóa NEWREC) và về View
+          PERFORM discard_unsaved_changes.
+          lv_discarded_by_prompt = abap_true.
+      ENDCASE.
+
+    ELSEIF lv_edit_existing_cnt > 0
+       AND lv_new_incomplete_cnt = 0
+       AND lv_new_complete_cnt   = 0.
+
+      lv_text = 'Bạn đã sửa dữ liệu trên dòng hiện có. Lưu trước khi tiếp tục?'.
+      CLEAR lv_ans.
+      CALL FUNCTION 'POPUP_TO_CONFIRM'
+        EXPORTING
+          titlebar              = 'Thay đổi chưa lưu'
+          text_question         = lv_text
+          text_button_1         = 'Lưu'
+          text_button_2         = 'Không lưu'
+          default_button        = '1'
+          display_cancel_button = 'X'
+        IMPORTING
+          answer                = lv_ans.
+      CASE lv_ans.
+        WHEN '1'.
+          PERFORM on_save.
+          IF gv_edit_md = abap_true.
+            RETURN.
+          ELSE.
+            lv_saved_by_prompt = abap_true.
+          ENDIF.
+        WHEN 'A'.
+          RETURN.
+        WHEN '2'.
+          PERFORM discard_unsaved_changes.
+          lv_discarded_by_prompt = abap_true.
+      ENDCASE.
+
+    ELSE.
+      lv_text = |Có thay đổi chưa lưu: | &&
+                lv_new_incomplete_cnt && ' NEWREC thiếu khóa, ' &&
+                lv_new_complete_cnt   && ' NEWREC đủ khóa, ' &&
+                lv_edit_existing_cnt  && ' thay đổi dòng cũ. Lưu trước khi tiếp tục?'.
+      CLEAR lv_ans.
+      CALL FUNCTION 'POPUP_TO_CONFIRM'
+        EXPORTING
+          titlebar              = 'Thay đổi chưa lưu'
+          text_question         = lv_text
+          text_button_1         = 'Lưu'
+          text_button_2         = 'Không lưu'
+          default_button        = '1'
+          display_cancel_button = 'X'
+        IMPORTING
+          answer                = lv_ans.
+      CASE lv_ans.
+        WHEN '1'.
+          PERFORM on_save.
+          IF gv_edit_md = abap_true.
+            RETURN.
+          ELSE.
+            lv_saved_by_prompt = abap_true.
+          ENDIF.
+        WHEN 'A'.
+          RETURN.
+        WHEN '2'.
+          PERFORM discard_unsaved_changes.
+          lv_discarded_by_prompt = abap_true.
+      ENDCASE.
     ENDIF.
 
-    "=== Xử lý các nút ===
-    CASE e_ucomm.
+  ENDIF.
 
-      WHEN 'EVTG'.
-        PERFORM has_actvt USING '02' CHANGING lv_ok.
-        IF lv_ok IS INITIAL.
-          MESSAGE 'Bạn không có quyền Edit (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
-          RETURN.
-        ENDIF.
-        IF gv_edit_md = abap_true OR gv_add_mode = abap_true.
-          gv_edit_md      = abap_false.
-          gv_add_mode     = abap_false.
-          gv_toolbar_mode = 'D'.
-          TRY. g_alv_grid->set_ready_for_input( 0 ). CATCH cx_root. ENDTRY.
-        ELSE.
-          gv_edit_md      = abap_true.
-          gv_add_mode     = abap_false.
-          gv_toolbar_mode = 'E'.
-          TRY. g_alv_grid->set_ready_for_input( 1 ). CATCH cx_root. ENDTRY.
-        ENDIF.
+  "=== Xử lý các nút ===
+  CASE e_ucomm.
+
+    WHEN 'EVTG'.
+      PERFORM has_actvt USING '02' CHANGING lv_ok.
+      IF lv_ok IS INITIAL.
+        MESSAGE 'Bạn không có quyền Edit (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
+        RETURN.
+      ENDIF.
+
+      " Nếu vừa LƯU hoặc vừa DISCARD từ popup -> đã ở đúng mode rồi
+      IF lv_saved_by_prompt = abap_true OR lv_discarded_by_prompt = abap_true.
         PERFORM apply_editability_and_push.
         IF g_alv_grid IS BOUND.
           g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
           TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
         ENDIF.
+        RETURN.
+      ENDIF.
 
-      WHEN 'ADD'.
-        PERFORM has_actvt USING '01' CHANGING lv_ok.
-        IF lv_ok IS INITIAL.
-          MESSAGE 'Bạn không có quyền Edit (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
-          RETURN.
+      " Nếu đang Edit/Add và CHƯA lưu/huỷ từ popup → pre-check duplicate NEWREC
+      IF ( gv_edit_md = abap_true OR gv_add_mode = abap_true ).
+        IF g_alv_grid IS BOUND.
+          TRY. g_alv_grid->check_changed_data( ). CATCH cx_root. ENDTRY.
         ENDIF.
 
-        ASSIGN gr_data->* TO <fs_tab>.
-        IF <fs_tab> IS ASSIGNED.
-          APPEND INITIAL LINE TO <fs_tab> ASSIGNING <fs_row>.
-          ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <fs_row> TO <fs_newrec>.
-          IF sy-subrc = 0. <fs_newrec> = 'X'. ENDIF.
+        CLEAR: lv_dup, lv_dup_msg, lv_off_idx.
+        PERFORM check_newrec_duplicate_all USING p_tab
+               CHANGING lv_dup lv_dup_msg lv_off_idx.
 
-          " Gán thông tin Created (chỉ cho dòng mới)
-          ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <fs_row> TO <fs_erdat>.
-          ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <fs_row> TO <fs_ertim>.
-          ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <fs_row> TO <fs_ernam>.
-          DATA: lv_user_tzone TYPE tznzone,
-                lv_local_date TYPE d,
-                lv_local_time TYPE t,
-                ts_utc        TYPE timestamp.
+        IF lv_dup = abap_true.
+          lv_msg = lv_dup_msg.
+          MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
 
-          " 1) Lấy timezone người dùng (ưu tiên SY-ZONLO vì luôn có, rồi mới thử class)
-          lv_user_tzone = sy-zonlo.
-          IF lv_user_tzone IS INITIAL.
+          IF g_alv_grid IS BOUND AND lv_off_idx > 0.
+            DATA: ls_row TYPE lvc_s_row, ls_col TYPE lvc_s_col.
+            ls_row-index = lv_off_idx.
+
+            CLEAR lv_key_for_focus.
+            READ TABLE gt_key_fields INDEX 1 INTO lv_key_for_focus.
+            IF sy-subrc = 0.
+              ls_col-fieldname = lv_key_for_focus.
+            ENDIF.
+
             TRY.
-                lv_user_tzone = cl_abap_context_info=>get_user_time_zone( ).
-              CATCH cx_abap_context_info_error.
-                lv_user_tzone = 'UTC'. " fallback an toàn
-            ENDTRY.
-          ENDIF.
-
-          " 2) Lấy timestamp UTC hiện tại (không phụ thuộc giờ máy chủ)
-          GET TIME STAMP FIELD ts_utc.
-
-          " 3) Chuyển UTC -> giờ người dùng
-          CONVERT TIME STAMP ts_utc TIME ZONE lv_user_tzone
-                  INTO DATE lv_local_date TIME lv_local_time.
-
-          " 4) Gán vào trường của bạn
-          IF <fs_erdat> IS ASSIGNED. <fs_erdat> = lv_local_date. ENDIF.
-          IF <fs_ertim> IS ASSIGNED. <fs_ertim> = lv_local_time. ENDIF.
-
-          IF <fs_ernam> IS ASSIGNED. <fs_ernam> = sy-uname. ENDIF.
-
-          " Không log audit ở đây – on_save sẽ xử lý
-
-          gv_add_mode     = abap_true.
-          gv_edit_md      = abap_true.
-          gv_toolbar_mode = 'E'.
-
-          PERFORM apply_editability_and_push.
-          IF g_alv_grid IS BOUND.
-            TRY. g_alv_grid->set_ready_for_input( 1 ). CATCH cx_root. ENDTRY.
-            g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
-            TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
-          ENDIF.
-
-          " Focus vào KEY đầu tiên
-          PERFORM ensure_keys USING p_tab.
-          READ TABLE gt_key_fields INDEX 1 INTO DATA(lv_first_key).
-          IF sy-subrc = 0 AND g_alv_grid IS BOUND.
-            DATA ls_row_id TYPE lvc_s_row.
-            DATA ls_col_id TYPE lvc_s_col.
-            ls_row_id-index     = lines( <fs_tab> ).
-            ls_col_id-fieldname = lv_first_key.
-            TRY.
-                g_alv_grid->set_current_cell_via_id(
-                  EXPORTING is_row_id    = ls_row_id
-                            is_column_id = ls_col_id ).
-                g_alv_grid->set_scroll_info_via_id(
-                  EXPORTING is_row_info = ls_row_id
-                            is_col_info = ls_col_id ).
+                g_alv_grid->set_current_cell_via_id( is_row_id = ls_row is_column_id = ls_col ).
+                g_alv_grid->set_scroll_info_via_id( is_row_info = ls_row is_col_info = ls_col ).
               CATCH cx_root.
             ENDTRY.
           ENDIF.
+          RETURN. " CHẶN chuyển View
         ENDIF.
+      ENDIF.
 
-      WHEN 'SAVE'.
-        PERFORM has_actvt USING '02' CHANGING lv_ok.
-        IF lv_ok IS INITIAL.
-          MESSAGE 'Bạn không có quyền Change (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
-          RETURN.
-        ENDIF.
+      " Toggle View/Edit như cũ
+      IF gv_edit_md = abap_true OR gv_add_mode = abap_true.
+        gv_edit_md      = abap_false.
+        gv_add_mode     = abap_false.
+        gv_toolbar_mode = 'D'.
+        TRY. g_alv_grid->set_ready_for_input( 0 ). CATCH cx_root. ENDTRY.
+      ELSE.
+        gv_edit_md      = abap_true.
+        gv_add_mode     = abap_false.
+        gv_toolbar_mode = 'E'.
+        TRY. g_alv_grid->set_ready_for_input( 1 ). CATCH cx_root. ENDTRY.
+      ENDIF.
 
-        " Giao toàn bộ cho on_save (đã: check_key_on_add + audit + commit + view mode)
-        PERFORM on_save.
+      PERFORM apply_editability_and_push.
+      IF g_alv_grid IS BOUND.
+        g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
+        TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
+      ENDIF.
+
+    WHEN 'ADD'.
+      PERFORM has_actvt USING '01' CHANGING lv_ok.
+      IF lv_ok IS INITIAL.
+        MESSAGE 'Bạn không có quyền Edit (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
         RETURN.
+      ENDIF.
 
-      WHEN 'DELE'.
-        PERFORM has_actvt USING '06' CHANGING lv_ok.
-        IF lv_ok IS INITIAL.
-          MESSAGE 'Bạn không có quyền Delete (ACTVT=06).' TYPE 'S' DISPLAY LIKE 'E'.
-          RETURN.
-        ENDIF.
+      ASSIGN gr_data->* TO <fs_tab>.
+      IF <fs_tab> IS ASSIGNED.
+        APPEND INITIAL LINE TO <fs_tab> ASSIGNING <fs_row>.
+        ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <fs_row> TO <fs_newrec>.
+        IF sy-subrc = 0. <fs_newrec> = 'X'. ENDIF.
 
-        DATA: lt_sel_idx TYPE lvc_t_row,
-              ls_cur_row TYPE lvc_s_row,
-              ls_cur_col TYPE lvc_s_col,
-              lv_cnt     TYPE i.
-        CLEAR lt_sel_idx.
+        ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <fs_row> TO <fs_erdat>.
+        ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <fs_row> TO <fs_ertim>.
+        ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <fs_row> TO <fs_ernam>.
+        DATA: lv_user_tzone TYPE tznzone,
+              lv_local_date TYPE d,
+              lv_local_time TYPE t,
+              ts_utc        TYPE timestamp.
 
-        IF g_alv_grid IS BOUND.
-          TRY. g_alv_grid->get_selected_rows( IMPORTING et_index_rows = lt_sel_idx ). CATCH cx_root. ENDTRY.
-        ENDIF.
-        IF lt_sel_idx IS INITIAL AND g_alv_grid IS BOUND.
+        lv_user_tzone = sy-zonlo.
+        IF lv_user_tzone IS INITIAL.
           TRY.
-              g_alv_grid->get_current_cell(
-                IMPORTING es_row_id = ls_cur_row
-                          es_col_id = ls_cur_col ).
-            CATCH cx_root.
+              lv_user_tzone = cl_abap_context_info=>get_user_time_zone( ).
+            CATCH cx_abap_context_info_error.
+              lv_user_tzone = 'UTC'.
           ENDTRY.
-          IF ls_cur_row-index > 0.
-            APPEND VALUE lvc_s_row( index = ls_cur_row-index ) TO lt_sel_idx.
-          ENDIF.
         ENDIF.
 
-        lv_cnt = lines( lt_sel_idx ).
-        IF lv_cnt = 0.
-          MESSAGE 'Vui lòng chọn dòng (hoặc đặt con trỏ) để xóa.' TYPE 'S' DISPLAY LIKE 'E'.
-          RETURN.
-        ENDIF.
+        GET TIME STAMP FIELD ts_utc.
+        CONVERT TIME STAMP ts_utc TIME ZONE lv_user_tzone
+                INTO DATE lv_local_date TIME lv_local_time.
 
-        CLEAR gv_del_newrec_only.
-        CLEAR: lv_new_incomplete, lv_other_changes.
-        PERFORM is_newrec_target_for_delete CHANGING gv_del_newrec_only.
-        PERFORM analyze_change_state       CHANGING lv_new_incomplete lv_other_changes.
+        IF <fs_erdat> IS ASSIGNED. <fs_erdat> = lv_local_date. ENDIF.
+        IF <fs_ertim> IS ASSIGNED. <fs_ertim> = lv_local_time. ENDIF.
+        IF <fs_ernam> IS ASSIGNED. <fs_ernam> = sy-uname. ENDIF.
 
-        DATA lv_need_confirm TYPE abap_bool VALUE abap_false.
-        CLEAR lv_question.
+        gv_add_mode     = abap_true.
+        gv_edit_md      = abap_true.
+        gv_toolbar_mode = 'E'.
 
-        IF gv_del_newrec_only = abap_true.
-          lv_need_confirm = abap_false.
-        ELSE.
-          lv_need_confirm = abap_true.
-          lv_question     = |Bạn có chắc muốn xóa { lv_cnt } dòng đã chọn?|.
-        ENDIF.
-
-        IF lv_need_confirm = abap_true.
-          CLEAR lv_ans_conf.
-          CALL FUNCTION 'POPUP_TO_CONFIRM'
-            EXPORTING
-              titlebar              = 'Xác nhận xóa'
-              text_question         = lv_question(70)
-              text_button_1         = 'Xóa'
-              text_button_2         = 'Không'
-              default_button        = '2'
-              display_cancel_button = space
-            IMPORTING
-              answer                = lv_ans_conf.
-          IF lv_ans_conf <> '1'.
-            RETURN.
-          ENDIF.
-        ENDIF.
-
-        CLEAR: lv_msg, lv_err.
-        PERFORM delete_selected USING p_tab CHANGING lv_msg lv_err.
-        IF lv_err IS INITIAL.
-          MESSAGE |{ COND string( WHEN lv_msg IS INITIAL THEN 'Đã xóa và ghi audit.' ELSE lv_msg ) }| TYPE 'S'.
-        ELSE.
-          MESSAGE |{ lv_err }| TYPE 'S' DISPLAY LIKE 'E'.
-        ENDIF.
-
+        PERFORM apply_editability_and_push.
         IF g_alv_grid IS BOUND.
+          TRY. g_alv_grid->set_ready_for_input( 1 ). CATCH cx_root. ENDTRY.
           g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
           TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
         ENDIF.
 
-      WHEN 'UPLD'.
-        PERFORM has_actvt USING '02' CHANGING lv_ok.
-        IF lv_ok IS INITIAL.
-          MESSAGE 'Bạn không có quyền Upload (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
+        PERFORM ensure_keys USING p_tab.
+        READ TABLE gt_key_fields INDEX 1 INTO lv_key_for_focus.
+        IF sy-subrc = 0 AND g_alv_grid IS BOUND.
+          DATA ls_row_id TYPE lvc_s_row.
+          DATA ls_col_id TYPE lvc_s_col.
+          ls_row_id-index     = lines( <fs_tab> ).
+          ls_col_id-fieldname = lv_key_for_focus.
+          TRY.
+              g_alv_grid->set_current_cell_via_id(
+                EXPORTING is_row_id    = ls_row_id
+                          is_column_id = ls_col_id ).
+              g_alv_grid->set_scroll_info_via_id(
+                EXPORTING is_row_info = ls_row_id
+                          is_col_info = ls_col_id ).
+            CATCH cx_root.
+          ENDTRY.
+        ENDIF.
+      ENDIF.
+
+    WHEN 'SAVE'.
+      PERFORM has_actvt USING '02' CHANGING lv_ok.
+      IF lv_ok IS INITIAL.
+        MESSAGE 'Bạn không có quyền Change (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
+        RETURN.
+      ENDIF.
+
+      PERFORM on_save.
+      RETURN.
+
+    WHEN 'DELE'.
+      PERFORM has_actvt USING '06' CHANGING lv_ok.
+      IF lv_ok IS INITIAL.
+        MESSAGE 'Bạn không có quyền Delete (ACTVT=06).' TYPE 'S' DISPLAY LIKE 'E'.
+        RETURN.
+      ENDIF.
+
+      DATA: lt_sel_idx TYPE lvc_t_row,
+            ls_cur_row TYPE lvc_s_row,
+            ls_cur_col TYPE lvc_s_col,
+            lv_cnt     TYPE i.
+      CLEAR lt_sel_idx.
+
+      IF g_alv_grid IS BOUND.
+        TRY. g_alv_grid->get_selected_rows( IMPORTING et_index_rows = lt_sel_idx ). CATCH cx_root. ENDTRY.
+      ENDIF.
+      IF lt_sel_idx IS INITIAL AND g_alv_grid IS BOUND.
+        TRY.
+            g_alv_grid->get_current_cell(
+              IMPORTING es_row_id = ls_cur_row
+                        es_col_id = ls_cur_col ).
+          CATCH cx_root.
+        ENDTRY.
+        IF ls_cur_row-index > 0.
+          APPEND VALUE lvc_s_row( index = ls_cur_row-index ) TO lt_sel_idx.
+        ENDIF.
+      ENDIF.
+
+      lv_cnt = lines( lt_sel_idx ).
+      IF lv_cnt = 0.
+        MESSAGE 'Vui lòng chọn dòng (hoặc đặt con trỏ) để xóa.' TYPE 'S' DISPLAY LIKE 'E'.
+        RETURN.
+      ENDIF.
+
+      CLEAR gv_del_newrec_only.
+      CLEAR: lv_new_incomplete, lv_other_changes.
+      PERFORM is_newrec_target_for_delete CHANGING gv_del_newrec_only.
+      PERFORM analyze_change_state       CHANGING lv_new_incomplete lv_other_changes.
+
+      DATA lv_need_confirm TYPE abap_bool VALUE abap_false.
+      CLEAR lv_question.
+
+      IF gv_del_newrec_only = abap_true.
+        lv_need_confirm = abap_false.
+      ELSE.
+        lv_need_confirm = abap_true.
+        lv_question     = |Bạn có chắc muốn xóa { lv_cnt } dòng đã chọn?|.
+      ENDIF.
+
+      IF lv_need_confirm = abap_true.
+        CLEAR lv_ans_conf.
+        CALL FUNCTION 'POPUP_TO_CONFIRM'
+          EXPORTING
+            titlebar              = 'Xác nhận xóa'
+            text_question         = lv_question(70)
+            text_button_1         = 'Xóa'
+            text_button_2         = 'Không'
+            default_button        = '2'
+            display_cancel_button = space
+          IMPORTING
+            answer                = lv_ans_conf.
+        IF lv_ans_conf <> '1'.
           RETURN.
         ENDIF.
-        PERFORM upload_data_strict_match.
+      ENDIF.
 
-      WHEN 'XLSX' OR 'TMPL' OR 'HIST'.
-        PERFORM has_actvt USING '03' CHANGING lv_ok.
-        IF lv_ok IS INITIAL.
-          MESSAGE 'Bạn không có quyền Display (ACTVT=03).' TYPE 'S' DISPLAY LIKE 'E'.
-          RETURN.
-        ENDIF.
-        CASE e_ucomm.
-          WHEN 'XLSX'. PERFORM download_excel_xlsx USING gr_data.
-          WHEN 'TMPL'. PERFORM download_template_xlsx.
-          WHEN 'HIST'. PERFORM show_audit_history.
-        ENDCASE.
+      CLEAR: lv_msg, lv_err.
+      PERFORM delete_selected USING p_tab CHANGING lv_msg lv_err.
+      IF lv_err IS INITIAL.
+        MESSAGE |{ COND string( WHEN lv_msg IS INITIAL THEN 'Đã xóa và ghi audit.' ELSE lv_msg ) }| TYPE 'S'.
+      ELSE.
+        MESSAGE |{ lv_err }| TYPE 'S' DISPLAY LIKE 'E'.
+      ENDIF.
 
-    ENDCASE.
+      IF g_alv_grid IS BOUND.
+        PERFORM ensure_celltab_component CHANGING gr_data.
+        PERFORM apply_editability_and_push.
+        g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
+        TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
+      ENDIF.
 
-    cl_gui_cfw=>flush( ).
-  ENDMETHOD.
+    WHEN 'UPLD'.
+      PERFORM has_actvt USING '02' CHANGING lv_ok.
+      IF lv_ok IS INITIAL.
+        MESSAGE 'Bạn không có quyền Upload (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
+        RETURN.
+      ENDIF.
+      PERFORM upload_data_strict_match.
+
+    WHEN 'XLSX' OR 'TMPL' OR 'HIST'.
+      PERFORM has_actvt USING '03' CHANGING lv_ok.
+      IF lv_ok IS INITIAL.
+        MESSAGE 'Bạn không có quyền Display (ACTVT=03).' TYPE 'S' DISPLAY LIKE 'E'.
+        RETURN.
+      ENDIF.
+      CASE e_ucomm.
+        WHEN 'XLSX'.
+          FIELD-SYMBOLS: <lt_all>      TYPE STANDARD TABLE,
+                         <lt_filtered> TYPE STANDARD TABLE,
+                         <ls_any>      TYPE any,
+                         <newrec_flag> TYPE any.
+
+          DATA: lo_typedesc TYPE REF TO cl_abap_typedescr,
+                lo_tabdescr TYPE REF TO cl_abap_tabledescr,
+                lr_filtered TYPE REF TO data.
+
+          IF g_alv_grid IS BOUND.
+            TRY.
+                g_alv_grid->check_changed_data( ).
+              CATCH cx_root.
+            ENDTRY.
+          ENDIF.
+
+          ASSIGN gr_data->* TO <lt_all>.
+          IF <lt_all> IS ASSIGNED.
+            lo_typedesc = cl_abap_tabledescr=>describe_by_data_ref( REF #( <lt_all> ) ).
+            lo_tabdescr ?= lo_typedesc.
+            CREATE DATA lr_filtered TYPE HANDLE lo_tabdescr.
+            ASSIGN lr_filtered->* TO <lt_filtered>.
+
+            LOOP AT <lt_all> ASSIGNING <ls_any>.
+              ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_any> TO <newrec_flag>.
+              IF sy-subrc = 0 AND <newrec_flag> = 'X'.
+                CONTINUE.
+              ENDIF.
+              APPEND <ls_any> TO <lt_filtered>.
+            ENDLOOP.
+
+            IF <lt_filtered> IS INITIAL.
+              MESSAGE 'Không có dữ liệu đã lưu để export.' TYPE 'S' DISPLAY LIKE 'E'.
+              RETURN.
+            ENDIF.
+
+            MESSAGE 'Các dòng chưa lưu sẽ không được export.' TYPE 'S'.
+            PERFORM download_excel_xlsx USING lr_filtered.
+          ELSE.
+            MESSAGE 'Không có dữ liệu để export.' TYPE 'S' DISPLAY LIKE 'E'.
+          ENDIF.
+
+        WHEN 'TMPL'. PERFORM download_template_xlsx.
+        WHEN 'HIST'. PERFORM show_audit_history.
+      ENDCASE.
+
+  ENDCASE.
+
+  cl_gui_cfw=>flush( ).
+ENDMETHOD.
+
+
 
 
 
@@ -1538,61 +1660,71 @@ CLASS lcl_alv_handler IMPLEMENTATION.
     ENDIF.
   ENDMETHOD.
 
+METHOD handle_data_changed.
+  DATA: lt_mod TYPE lvc_t_modi,
+        ls_mod TYPE lvc_s_modi.
 
-  METHOD handle_data_changed.
-    DATA: lt_mod TYPE lvc_t_modi,
-          ls_mod TYPE lvc_s_modi.
+  FIELD-SYMBOLS: <outtab> TYPE STANDARD TABLE,
+                 <row>    TYPE any,
+                 <cell>   TYPE any.
 
-    FIELD-SYMBOLS: <outtab> TYPE STANDARD TABLE,
-                   <row>    TYPE any,
-                   <cell>   TYPE any.
+  ASSIGN gr_data->* TO <outtab>.
+  IF <outtab> IS NOT ASSIGNED.
+    RETURN.
+  ENDIF.
 
-    ASSIGN gr_data->* TO <outtab>.
-    IF <outtab> IS NOT ASSIGNED.
-      RETURN.
+  lt_mod = er_data_changed->mt_mod_cells.
+
+  " Danh sách cột audit cần khóa tuyệt đối
+  DATA: lt_audit TYPE TABLE OF lvc_fname WITH DEFAULT KEY.
+  APPEND 'ERDAT' TO lt_audit.
+  APPEND 'ERTIM' TO lt_audit.
+  APPEND 'ERNAM' TO lt_audit.
+  APPEND 'AEDAT' TO lt_audit.
+  APPEND 'AETIM' TO lt_audit.
+  APPEND 'AENAM' TO lt_audit.
+
+  " Chỉ set dirty khi thật sự có thay đổi trên dòng CŨ
+  DATA(lv_nonnewrec_changed) = abap_false.
+
+  LOOP AT lt_mod INTO ls_mod.
+
+    " --- 0) Chặn tuyệt đối: AUDIT (kể cả paste)
+    READ TABLE lt_audit WITH KEY table_line = ls_mod-fieldname TRANSPORTING NO FIELDS.
+    IF sy-subrc = 0.
+      READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
+      IF sy-subrc = 0.
+        ASSIGN COMPONENT ls_mod-fieldname OF STRUCTURE <row> TO <cell>.
+        IF sy-subrc = 0.
+          er_data_changed->modify_cell(
+            EXPORTING i_row_id    = ls_mod-row_id
+                      i_fieldname = ls_mod-fieldname
+                      i_value     = <cell> ).
+          er_data_changed->add_protocol_entry(
+            i_msgid = '00' i_msgno = '398' i_msgty = 'E'
+            i_fieldname = ls_mod-fieldname
+            i_row_id   = ls_mod-row_id
+            i_msgv1    = |Field { ls_mod-fieldname } is not editable (audit)| ).
+        ENDIF.
+      ENDIF.
+      CONTINUE.
     ENDIF.
 
-    lt_mod = er_data_changed->mt_mod_cells.
-
-    LOOP AT lt_mod INTO ls_mod.
-
-      "--- 1) KEY: chỉ cho phép khi đang Add và dòng NEWREC = 'X'
-      READ TABLE gt_key_fields WITH KEY table_line = ls_mod-fieldname TRANSPORTING NO FIELDS.
-      IF sy-subrc = 0. " là KEY
-        DATA(lv_block_key) = abap_true.
-        IF gv_add_mode = abap_true AND ls_mod-row_id > 0.
-          READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
-          IF sy-subrc = 0.
-            ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <row> TO <cell>.
-            IF sy-subrc = 0 AND <cell> = 'X'.
-              lv_block_key = abap_false.
-            ENDIF.
+    " --- 1) KEY: chỉ cho phép khi đang Add và dòng NEWREC = 'X'
+    READ TABLE gt_key_fields WITH KEY table_line = ls_mod-fieldname TRANSPORTING NO FIELDS.
+    IF sy-subrc = 0. " Là KEY
+      DATA(lv_block_key) = abap_true.
+      IF gv_add_mode = abap_true AND ls_mod-row_id > 0.
+        READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
+        IF sy-subrc = 0.
+          ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <row> TO <cell>.
+          IF sy-subrc = 0 AND <cell> = 'X'.
+            lv_block_key = abap_false.
           ENDIF.
-        ENDIF.
-
-        IF lv_block_key = abap_true.
-          " trả lại giá trị cũ
-          READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
-          IF sy-subrc = 0.
-            ASSIGN COMPONENT ls_mod-fieldname OF STRUCTURE <row> TO <cell>.
-            IF sy-subrc = 0.
-              er_data_changed->modify_cell(
-                EXPORTING i_row_id    = ls_mod-row_id
-                          i_fieldname = ls_mod-fieldname
-                          i_value     = <cell> ).
-              er_data_changed->add_protocol_entry(
-                i_msgid = '00' i_msgno = '398' i_msgty = 'E'
-                i_fieldname = ls_mod-fieldname
-                i_row_id   = ls_mod-row_id
-                i_msgv1    = |Field { ls_mod-fieldname } is not editable (key)| ).
-            ENDIF.
-          ENDIF.
-          CONTINUE.
         ENDIF.
       ENDIF.
 
-      "--- 2) Non-key: chỉ cho phép khi đang Edit
-      IF gv_edit_md <> abap_true.
+      IF lv_block_key = abap_true.
         READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
         IF sy-subrc = 0.
           ASSIGN COMPONENT ls_mod-fieldname OF STRUCTURE <row> TO <cell>.
@@ -1605,31 +1737,132 @@ CLASS lcl_alv_handler IMPLEMENTATION.
               i_msgid = '00' i_msgno = '398' i_msgty = 'E'
               i_fieldname = ls_mod-fieldname
               i_row_id   = ls_mod-row_id
-              i_msgv1    = |Field { ls_mod-fieldname } is read-only in View mode| ).
+              i_msgv1    = |Field { ls_mod-fieldname } is not editable (key)| ).
           ENDIF.
         ENDIF.
         CONTINUE.
       ENDIF.
+    ENDIF.
 
-      "--- 3) Đánh dấu dirty CHỈ khi không phải dòng NEWREC
-      DATA(lv_is_newrec) = abap_false.
-      IF ls_mod-row_id > 0.
-        READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
+    " --- 2) Non-key: chỉ cho phép khi đang Edit
+    IF gv_edit_md <> abap_true.
+      READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
+      IF sy-subrc = 0.
+        ASSIGN COMPONENT ls_mod-fieldname OF STRUCTURE <row> TO <cell>.
         IF sy-subrc = 0.
-          ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <row> TO <cell>.
-          IF sy-subrc = 0 AND <cell> = 'X'.
-            lv_is_newrec = abap_true.
+          er_data_changed->modify_cell(
+            EXPORTING i_row_id    = ls_mod-row_id
+                      i_fieldname = ls_mod-fieldname
+                      i_value     = <cell> ).
+          er_data_changed->add_protocol_entry(
+            i_msgid = '00' i_msgno = '398' i_msgty = 'E'
+            i_fieldname = ls_mod-fieldname
+            i_row_id   = ls_mod-row_id
+            i_msgv1    = |Field { ls_mod-fieldname } is read-only in View mode| ).
+        ENDIF.
+      ENDIF.
+      CONTINUE.
+    ENDIF.
+
+    " --- 3) Đánh dấu dirty CHỈ khi không phải dòng NEWREC
+    DATA(lv_is_newrec) = abap_false.
+    IF ls_mod-row_id > 0.
+      READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
+      IF sy-subrc = 0.
+        ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <row> TO <cell>.
+        IF sy-subrc = 0 AND <cell> = 'X'.
+          lv_is_newrec = abap_true.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+    " Chỉ set cờ khi GIÁ TRỊ THỰC SỰ THAY ĐỔI và không phải NEWREC
+    IF lv_is_newrec = abap_false.
+      DATA(lv_old_value) = VALUE string( ).
+      DATA(lv_changed)   = abap_false.
+
+      READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
+      IF sy-subrc = 0.
+        ASSIGN COMPONENT ls_mod-fieldname OF STRUCTURE <row> TO <cell>.
+        IF sy-subrc = 0.
+          " Chuẩn hóa giá trị cũ về chuỗi để so sánh an toàn
+          lv_old_value = |{ <cell> }|.
+          " Với DATS/TIMS hoặc số, ALV đưa ls_mod-value là text → so sánh chuỗi
+          IF lv_old_value <> ls_mod-value.
+            lv_changed = abap_true.
           ENDIF.
         ENDIF.
       ENDIF.
 
-      IF lv_is_newrec = abap_false.
-        " thay đổi trên dòng cũ -> coi là dirty để còn hỏi lưu
-        gv_dirty = abap_true.
+      IF lv_changed = abap_true.
+        " Ghi nhận dòng CŨ đã chỉnh (unique theo khóa)
+        DATA(lv_keyhash) = VALUE string( ).
+        READ TABLE <outtab> INDEX ls_mod-row_id ASSIGNING <row>.
+        IF sy-subrc = 0.
+          PERFORM make_row_key USING <row> CHANGING lv_keyhash.
+          IF lv_keyhash IS NOT INITIAL.
+            INSERT lv_keyhash INTO TABLE gt_changed_existing_keys.
+          ENDIF.
+        ENDIF.
+
+        lv_nonnewrec_changed = abap_true.
+      ENDIF.
+    ENDIF.
+
+  ENDLOOP.
+
+  " Cập nhật lại gv_dirty theo đúng bản chất thay đổi dòng cũ
+  gv_dirty = lv_nonnewrec_changed.
+
+  " === 4) Xử lý các dòng được chèn do paste (ALV báo qua mt_inserted_rows) ===
+  DATA lt_ins TYPE lvc_t_roid.
+  lt_ins = er_data_changed->mt_inserted_rows.
+
+  IF lt_ins IS NOT INITIAL.
+    FIELD-SYMBOLS: <celltab> TYPE lvc_t_styl.
+    LOOP AT lt_ins INTO DATA(ls_ins).
+      " bảo đảm có record tại row_id
+      READ TABLE <outtab> INDEX ls_ins-row_id ASSIGNING <row>.
+      IF sy-subrc <> 0.
+        DATA(lv_need) = ls_ins-row_id - lines( <outtab> ).
+        DO lv_need TIMES.
+          APPEND INITIAL LINE TO <outtab>.
+        ENDDO.
+        READ TABLE <outtab> INDEX ls_ins-row_id ASSIGNING <row>.
       ENDIF.
 
+      IF <row> IS ASSIGNED.
+        " gắn NEWREC = 'X'
+        ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <row> TO <cell>.
+        IF sy-subrc = 0. <cell> = 'X'. ENDIF.
+
+        " xoá trắng audit
+        FIELD-SYMBOLS: <erdat> TYPE any, <ertim> TYPE any, <ernam> TYPE any,
+                       <aedat> TYPE any, <aetim> TYPE any, <aenam> TYPE any.
+        ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <row> TO <erdat>. IF sy-subrc = 0. CLEAR <erdat>. ENDIF.
+        ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <row> TO <ertim>. IF sy-subrc = 0. CLEAR <ertim>. ENDIF.
+        ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <row> TO <ernam>. IF sy-subrc = 0. CLEAR <ernam>. ENDIF.
+        ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <row> TO <aedat>. IF sy-subrc = 0. CLEAR <aedat>. ENDIF.
+        ASSIGN COMPONENT 'AETIM' OF STRUCTURE <row> TO <aetim>. IF sy-subrc = 0. CLEAR <aetim>. ENDIF.
+        ASSIGN COMPONENT 'AENAM' OF STRUCTURE <row> TO <aenam>. IF sy-subrc = 0. CLEAR <aenam>. ENDIF.
+
+        " clear CELLTAB để áp lại style sạch
+        ASSIGN COMPONENT 'CELLTAB' OF STRUCTURE <row> TO <celltab>.
+        IF sy-subrc = 0. CLEAR <celltab>. ENDIF.
+      ENDIF.
     ENDLOOP.
-  ENDMETHOD.
+
+    " bật add mode & áp style cho toàn bộ dòng NEWREC vừa chèn
+    gv_add_mode = abap_true.
+    PERFORM apply_editability_and_push.
+
+    IF g_alv_grid IS BOUND.
+      g_alv_grid->refresh_table_display(
+        EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+    ENDIF.
+  ENDIF.
+ENDMETHOD.
+
 
 
 ENDCLASS.
@@ -1692,11 +1925,15 @@ MODULE pbo_0100 OUTPUT.
 
         PERFORM ensure_celltab_component CHANGING gr_data.
         ASSIGN gr_data->* TO <fs_table>.
+        PERFORM build_excluding_toolbar.
 
         g_alv_grid->set_table_for_first_display(
-        EXPORTING is_layout = gs_layout
-        CHANGING it_outtab = <fs_table>
-        it_fieldcatalog = gt_fieldcat ).
+          EXPORTING
+            is_layout            = gs_layout
+            it_toolbar_excluding = gt_tb_excl
+          CHANGING
+            it_outtab            = <fs_table>
+            it_fieldcatalog      = gt_fieldcat ).
       ELSE.
         g_alv_grid->refresh_table_display(
         EXPORTING is_stable = VALUE #( row = 'X' col = 'X' ) ).
@@ -1728,7 +1965,6 @@ ENDMODULE.
 *&---------------------------------------------------------------------*
 *& Module PAI_0100 INPUT
 *&---------------------------------------------------------------------*
-
 MODULE pai_0100 INPUT.
   g_okcode = sy-ucomm.
   CLEAR sy-ucomm.
@@ -1738,9 +1974,12 @@ MODULE pai_0100 INPUT.
   ENDIF.
 
   TRY.
+
       CASE g_okcode.
 
+        "==================================================================
         WHEN 'BACK' OR 'CANC' OR 'EXIT'.
+        "==================================================================
 
           " Đẩy giá trị đang nhập về itab trước khi so sánh
           IF g_alv_grid IS BOUND.
@@ -1769,228 +2008,32 @@ MODULE pai_0100 INPUT.
           " Không có thay đổi -> thoát luôn
           IF lv_has_change_exit = abap_false.
             LEAVE TO SCREEN 0.
-            RETURN.
-          ENDIF.
-
-          " --- CASE 1: CHỈ NEWREC THIẾU KHÓA ---
-          IF     lv_new_incomplete_cnt_exit > 0
-             AND lv_new_complete_cnt_exit   = 0
-             AND lv_edit_existing_cnt_exit  = 0.
-
-            lv_text_exit = |Có | && lv_new_incomplete_cnt_exit &&
-                           | dòng mới CHƯA NHẬP ĐỦ KHÓA. Bỏ dòng mới và thoát?|.
-            CLEAR lv_ans_exit.
-            CALL FUNCTION 'POPUP_TO_CONFIRM'
-              EXPORTING
-                titlebar              = 'Dòng mới thiếu khóa'
-                text_question         = lv_text_exit
-                text_button_1         = 'Bỏ & Thoát'
-                text_button_2         = 'Quay lại'
-                default_button        = '2'
-                display_cancel_button = space
-              IMPORTING
-                answer                = lv_ans_exit.
-
-            IF lv_ans_exit = '1'.
-              PERFORM purge_incomplete_newrecs.
-              LEAVE TO SCREEN 0.
-            ELSE.
-              " Ở lại màn hình, GIỮ EDIT
-              PERFORM stay_in_edit_and_focus.
-              " --- Neo an toàn ---
-              gv_edit_md      = abap_true.
-              gv_toolbar_mode = 'E'.
-              PERFORM apply_editability_and_push.
-              IF g_alv_grid IS BOUND.
-                TRY.
-                    g_alv_grid->set_ready_for_input( 1 ).
-                    g_alv_grid->refresh_table_display(
-                      EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-                    g_alv_grid->set_toolbar_interactive( ).
-                  CATCH cx_root.
-                ENDTRY.
-              ENDIF.
-              CLEAR g_okcode.
-              cl_gui_cfw=>flush( ).
-              RETURN.
-            ENDIF.
-
-          " --- CASE 2: CHỈ NEWREC ĐỦ KHÓA (chưa lưu) ---
-          ELSEIF lv_new_complete_cnt_exit   > 0
-             AND lv_edit_existing_cnt_exit  = 0
-             AND lv_new_incomplete_cnt_exit = 0.
-
-            lv_text_exit = |Có | && lv_new_complete_cnt_exit &&
-                           | dòng mới CHƯA LƯU. Lưu trước khi thoát?|.
-            CLEAR lv_ans_exit.
-            CALL FUNCTION 'POPUP_TO_CONFIRM'
-              EXPORTING
-                titlebar              = 'Dòng mới chưa lưu'
-                text_question         = lv_text_exit
-                text_button_1         = 'Lưu'
-                text_button_2         = 'Không lưu'
-                default_button        = '1'
-                display_cancel_button = 'X'
-              IMPORTING
-                answer                = lv_ans_exit.
-
-            CASE lv_ans_exit.
-              WHEN '1'. " Lưu rồi thoát nếu OK
-                PERFORM on_save.
-                IF gv_dirty = abap_true.
-                  " Lưu lỗi -> ở lại màn hình (GIỮ EDIT)
-                  PERFORM stay_in_edit_and_focus.
-                  gv_edit_md      = abap_true.
-                  gv_toolbar_mode = 'E'.
-                  PERFORM apply_editability_and_push.
-                  IF g_alv_grid IS BOUND.
-                    TRY.
-                        g_alv_grid->set_ready_for_input( 1 ).
-                        g_alv_grid->refresh_table_display(
-                          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-                        g_alv_grid->set_toolbar_interactive( ).
-                      CATCH cx_root.
-                    ENDTRY.
-                  ENDIF.
-                  CLEAR g_okcode.
-                  cl_gui_cfw=>flush( ).
-                  RETURN.
-                ENDIF.
-                LEAVE TO SCREEN 0.
-
-              WHEN '2'. " Không lưu -> bỏ thay đổi rồi thoát
-                PERFORM discard_unsaved_changes.
-                LEAVE TO SCREEN 0.
-
-              WHEN 'A'. " Cancel -> ở lại và giữ Edit
-                PERFORM stay_in_edit_and_focus.
-                gv_edit_md      = abap_true.
-                gv_toolbar_mode = 'E'.
-                PERFORM apply_editability_and_push.
-                IF g_alv_grid IS BOUND.
-                  TRY.
-                      g_alv_grid->set_ready_for_input( 1 ).
-                      g_alv_grid->refresh_table_display(
-                        EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-                      g_alv_grid->set_toolbar_interactive( ).
-                    CATCH cx_root.
-                  ENDTRY.
-                ENDIF.
-                CLEAR g_okcode.
-                cl_gui_cfw=>flush( ).
-                RETURN.
-            ENDCASE.
-
-          " --- CASE 3: CHỈ sửa dòng DB cũ ---
-          ELSEIF lv_edit_existing_cnt_exit  > 0
-             AND lv_new_incomplete_cnt_exit = 0
-             AND lv_new_complete_cnt_exit   = 0.
-
-            lv_text_exit = 'Bạn đã sửa dữ liệu trên dòng hiện có. Lưu trước khi thoát?'.
-            CLEAR lv_ans_exit.
-            CALL FUNCTION 'POPUP_TO_CONFIRM'
-              EXPORTING
-                titlebar              = 'Thay đổi chưa lưu'
-                text_question         = lv_text_exit
-                text_button_1         = 'Lưu'
-                text_button_2         = 'Không lưu'
-                default_button        = '1'
-                display_cancel_button = 'X'
-              IMPORTING
-                answer                = lv_ans_exit.
-
-            CASE lv_ans_exit.
-              WHEN '1'.
-                PERFORM on_save.
-                IF gv_dirty = abap_true.
-                  PERFORM stay_in_edit_and_focus.
-                  gv_edit_md      = abap_true.
-                  gv_toolbar_mode = 'E'.
-                  PERFORM apply_editability_and_push.
-                  IF g_alv_grid IS BOUND.
-                    TRY.
-                        g_alv_grid->set_ready_for_input( 1 ).
-                        g_alv_grid->refresh_table_display(
-                          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-                        g_alv_grid->set_toolbar_interactive( ).
-                      CATCH cx_root.
-                    ENDTRY.
-                  ENDIF.
-                  CLEAR g_okcode.
-                  cl_gui_cfw=>flush( ).
-                  RETURN.
-                ENDIF.
-                LEAVE TO SCREEN 0.
-
-              WHEN '2'.
-                PERFORM discard_unsaved_changes.
-                LEAVE TO SCREEN 0.
-
-              WHEN 'A'.
-                PERFORM stay_in_edit_and_focus.
-                gv_edit_md      = abap_true.
-                gv_toolbar_mode = 'E'.
-                PERFORM apply_editability_and_push.
-                IF g_alv_grid IS BOUND.
-                  TRY.
-                      g_alv_grid->set_ready_for_input( 1 ).
-                      g_alv_grid->refresh_table_display(
-                        EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-                      g_alv_grid->set_toolbar_interactive( ).
-                    CATCH cx_root.
-                  ENDTRY.
-                ENDIF.
-                CLEAR g_okcode.
-                cl_gui_cfw=>flush( ).
-                RETURN.
-            ENDCASE.
-
-          " --- CASE 4: HỖN HỢP ---
           ELSE.
-            lv_text_exit = |Có thay đổi chưa lưu: | &&
-                           lv_new_incomplete_cnt_exit && ' NEWREC thiếu khóa, ' &&
-                           lv_new_complete_cnt_exit   && ' NEWREC đủ khóa, ' &&
-                           lv_edit_existing_cnt_exit  && ' thay đổi dòng cũ. Lưu trước khi thoát?'.
-            CLEAR lv_ans_exit.
-            CALL FUNCTION 'POPUP_TO_CONFIRM'
-              EXPORTING
-                titlebar              = 'Thay đổi chưa lưu'
-                text_question         = lv_text_exit
-                text_button_1         = 'Lưu'
-                text_button_2         = 'Không lưu'
-                default_button        = '1'
-                display_cancel_button = 'X'
-              IMPORTING
-                answer                = lv_ans_exit.
 
-            CASE lv_ans_exit.
-              WHEN '1'.
-                PERFORM on_save.
-                IF gv_dirty = abap_true.
-                  PERFORM stay_in_edit_and_focus.
-                  gv_edit_md      = abap_true.
-                  gv_toolbar_mode = 'E'.
-                  PERFORM apply_editability_and_push.
-                  IF g_alv_grid IS BOUND.
-                    TRY.
-                        g_alv_grid->set_ready_for_input( 1 ).
-                        g_alv_grid->refresh_table_display(
-                          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-                        g_alv_grid->set_toolbar_interactive( ).
-                      CATCH cx_root.
-                    ENDTRY.
-                  ENDIF.
-                  CLEAR g_okcode.
-                  cl_gui_cfw=>flush( ).
-                  RETURN.
-                ENDIF.
+            " --- CASE 1: CHỈ NEWREC THIẾU KHÓA ---
+            IF     lv_new_incomplete_cnt_exit > 0
+               AND lv_new_complete_cnt_exit   = 0
+               AND lv_edit_existing_cnt_exit  = 0.
+
+              lv_text_exit = |Có | && lv_new_incomplete_cnt_exit &&
+                             | dòng mới CHƯA NHẬP ĐỦ KHÓA. Bỏ dòng mới và thoát?|.
+              CLEAR lv_ans_exit.
+              CALL FUNCTION 'POPUP_TO_CONFIRM'
+                EXPORTING
+                  titlebar              = 'Dòng mới thiếu khóa'
+                  text_question         = lv_text_exit
+                  text_button_1         = 'Bỏ & Thoát'
+                  text_button_2         = 'Quay lại'
+                  default_button        = '2'
+                  display_cancel_button = space
+                IMPORTING
+                  answer                = lv_ans_exit.
+
+              IF lv_ans_exit = '1'.
+                PERFORM purge_incomplete_newrecs.
                 LEAVE TO SCREEN 0.
-
-              WHEN '2'.
-                PERFORM discard_unsaved_changes.
-                LEAVE TO SCREEN 0.
-
-              WHEN 'A'.
+              ELSE.
+                " Ở lại màn hình, GIỮ EDIT
                 PERFORM stay_in_edit_and_focus.
                 gv_edit_md      = abap_true.
                 gv_toolbar_mode = 'E'.
@@ -2006,44 +2049,224 @@ MODULE pai_0100 INPUT.
                 ENDIF.
                 CLEAR g_okcode.
                 cl_gui_cfw=>flush( ).
-                RETURN.
-            ENDCASE.
-          ENDIF.
-
-        WHEN 'SAVE'.
-          PERFORM on_save.
-
-          " Reset trạng thái sau khi lưu thành công
-          gv_dirty        = abap_false.
-          gv_add_mode     = abap_false.
-          gv_edit_md      = abap_false.
-          gv_toolbar_mode = 'D'.
-
-          IF g_alv_grid IS BOUND.
-            TRY. g_alv_grid->set_ready_for_input( 0 ). CATCH cx_root. ENDTRY.
-          ENDIF.
-
-          " Xóa NEWREC ở tất cả dòng nếu có
-          FIELD-SYMBOLS: <lt>     TYPE STANDARD TABLE,
-                         <ls>     TYPE any,
-                         <newrec> TYPE any.
-          ASSIGN gr_data->* TO <lt>.
-          IF <lt> IS ASSIGNED.
-            LOOP AT <lt> ASSIGNING <ls>.
-              ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <newrec>.
-              IF sy-subrc = 0.
-                CLEAR <newrec>.
               ENDIF.
-            ENDLOOP.
-          ENDIF.
 
+            " --- CASE 2: CHỈ NEWREC ĐỦ KHÓA (chưa lưu) ---
+            ELSEIF lv_new_complete_cnt_exit   > 0
+               AND lv_edit_existing_cnt_exit  = 0
+               AND lv_new_incomplete_cnt_exit = 0.
+
+              lv_text_exit = |Có | && lv_new_complete_cnt_exit &&
+                             | dòng mới CHƯA LƯU. Lưu trước khi thoát?|.
+              CLEAR lv_ans_exit.
+              CALL FUNCTION 'POPUP_TO_CONFIRM'
+                EXPORTING
+                  titlebar              = 'Dòng mới chưa lưu'
+                  text_question         = lv_text_exit
+                  text_button_1         = 'Lưu'
+                  text_button_2         = 'Không lưu'
+                  default_button        = '1'
+                  display_cancel_button = 'X'
+                IMPORTING
+                  answer                = lv_ans_exit.
+
+              CASE lv_ans_exit.
+                WHEN '1'. " Lưu rồi thoát nếu OK
+                  PERFORM on_save.
+                  " on_save: lỗi -> giữ Edit & return; OK -> về View
+                  IF gv_edit_md = abap_true. " nghĩa là còn ở Edit => lỗi
+                    PERFORM stay_in_edit_and_focus.
+                    PERFORM apply_editability_and_push.
+                    IF g_alv_grid IS BOUND.
+                      TRY.
+                          g_alv_grid->set_ready_for_input( 1 ).
+                          g_alv_grid->refresh_table_display(
+                            EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+                          g_alv_grid->set_toolbar_interactive( ).
+                        CATCH cx_root.
+                      ENDTRY.
+                    ENDIF.
+                    CLEAR g_okcode.
+                    cl_gui_cfw=>flush( ).
+                    " Ở lại màn hình
+                  ELSE.
+                    LEAVE TO SCREEN 0.
+                  ENDIF.
+
+                WHEN '2'. " Không lưu -> bỏ thay đổi rồi thoát
+                  PERFORM discard_unsaved_changes.
+                  LEAVE TO SCREEN 0.
+
+                WHEN 'A'. " Cancel -> ở lại và giữ Edit
+                  PERFORM stay_in_edit_and_focus.
+                  gv_edit_md      = abap_true.
+                  gv_toolbar_mode = 'E'.
+                  PERFORM apply_editability_and_push.
+                  IF g_alv_grid IS BOUND.
+                    TRY.
+                        g_alv_grid->set_ready_for_input( 1 ).
+                        g_alv_grid->refresh_table_display(
+                          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+                        g_alv_grid->set_toolbar_interactive( ).
+                      CATCH cx_root.
+                    ENDTRY.
+                  ENDIF.
+                  CLEAR g_okcode.
+                  cl_gui_cfw=>flush( ).
+              ENDCASE.
+
+            " --- CASE 3: CHỈ sửa dòng DB cũ ---
+            ELSEIF lv_edit_existing_cnt_exit  > 0
+               AND lv_new_incomplete_cnt_exit = 0
+               AND lv_new_complete_cnt_exit   = 0.
+
+              lv_text_exit = 'Bạn đã sửa dữ liệu trên dòng hiện có. Lưu trước khi thoát?'.
+              CLEAR lv_ans_exit.
+              CALL FUNCTION 'POPUP_TO_CONFIRM'
+                EXPORTING
+                  titlebar              = 'Thay đổi chưa lưu'
+                  text_question         = lv_text_exit
+                  text_button_1         = 'Lưu'
+                  text_button_2         = 'Không lưu'
+                  default_button        = '1'
+                  display_cancel_button = 'X'
+                IMPORTING
+                  answer                = lv_ans_exit.
+
+              CASE lv_ans_exit.
+                WHEN '1'.
+                  PERFORM on_save.
+                  IF gv_edit_md = abap_true. " còn ở Edit => lỗi
+                    PERFORM stay_in_edit_and_focus.
+                    PERFORM apply_editability_and_push.
+                    IF g_alv_grid IS BOUND.
+                      TRY.
+                          g_alv_grid->set_ready_for_input( 1 ).
+                          g_alv_grid->refresh_table_display(
+                            EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+                          g_alv_grid->set_toolbar_interactive( ).
+                        CATCH cx_root.
+                      ENDTRY.
+                    ENDIF.
+                    CLEAR g_okcode.
+                    cl_gui_cfw=>flush( ).
+                  ELSE.
+                    LEAVE TO SCREEN 0.
+                  ENDIF.
+
+                WHEN '2'.
+                  PERFORM discard_unsaved_changes.
+                  LEAVE TO SCREEN 0.
+
+                WHEN 'A'.
+                  PERFORM stay_in_edit_and_focus.
+                  gv_edit_md      = abap_true.
+                  gv_toolbar_mode = 'E'.
+                  PERFORM apply_editability_and_push.
+                  IF g_alv_grid IS BOUND.
+                    TRY.
+                        g_alv_grid->set_ready_for_input( 1 ).
+                        g_alv_grid->refresh_table_display(
+                          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+                        g_alv_grid->set_toolbar_interactive( ).
+                      CATCH cx_root.
+                    ENDTRY.
+                  ENDIF.
+                  CLEAR g_okcode.
+                  cl_gui_cfw=>flush( ).
+              ENDCASE.
+
+            " --- CASE 4: HỖN HỢP ---
+            ELSE.
+              lv_text_exit = |Có thay đổi chưa lưu: | &&
+                             lv_new_incomplete_cnt_exit && ' NEWREC thiếu khóa, ' &&
+                             lv_new_complete_cnt_exit   && ' NEWREC đủ khóa, ' &&
+                             lv_edit_existing_cnt_exit  && ' thay đổi dòng cũ. Lưu trước khi thoát?'.
+              CLEAR lv_ans_exit.
+              CALL FUNCTION 'POPUP_TO_CONFIRM'
+                EXPORTING
+                  titlebar              = 'Thay đổi chưa lưu'
+                  text_question         = lv_text_exit
+                  text_button_1         = 'Lưu'
+                  text_button_2         = 'Không lưu'
+                  default_button        = '1'
+                  display_cancel_button = 'X'
+                IMPORTING
+                  answer                = lv_ans_exit.
+
+              CASE lv_ans_exit.
+                WHEN '1'.
+                  PERFORM on_save.
+                  IF gv_edit_md = abap_true. " còn ở Edit => lỗi
+                    PERFORM stay_in_edit_and_focus.
+                    PERFORM apply_editability_and_push.
+                    IF g_alv_grid IS BOUND.
+                      TRY.
+                          g_alv_grid->set_ready_for_input( 1 ).
+                          g_alv_grid->refresh_table_display(
+                            EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+                          g_alv_grid->set_toolbar_interactive( ).
+                        CATCH cx_root.
+                      ENDTRY.
+                    ENDIF.
+                    CLEAR g_okcode.
+                    cl_gui_cfw=>flush( ).
+                  ELSE.
+                    LEAVE TO SCREEN 0.
+                  ENDIF.
+
+                WHEN '2'.
+                  PERFORM discard_unsaved_changes.
+                  LEAVE TO SCREEN 0.
+
+                WHEN 'A'.
+                  PERFORM stay_in_edit_and_focus.
+                  gv_edit_md      = abap_true.
+                  gv_toolbar_mode = 'E'.
+                  PERFORM apply_editability_and_push.
+                  IF g_alv_grid IS BOUND.
+                    TRY.
+                        g_alv_grid->set_ready_for_input( 1 ).
+                        g_alv_grid->refresh_table_display(
+                          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+                        g_alv_grid->set_toolbar_interactive( ).
+                      CATCH cx_root.
+                    ENDTRY.
+                  ENDIF.
+                  CLEAR g_okcode.
+                  cl_gui_cfw=>flush( ).
+              ENDCASE.
+
+            ENDIF. " kết thúc ELSE có thay đổi
+
+          ENDIF. " lv_has_change_exit
+
+        "==================================================================
+        WHEN 'SAVE'.
+        "==================================================================
+
+          PERFORM on_save.  "on_save tự quyết định: OK -> về View, Lỗi -> ở lại Edit
+
+          " Áp lại editability & toolbar theo gv_edit_md mà on_save vừa set
           PERFORM apply_editability_and_push.
+
           IF g_alv_grid IS BOUND.
+            TRY.
+                g_alv_grid->set_ready_for_input( COND i( WHEN gv_edit_md = abap_true THEN 1 ELSE 0 ) ).
+              CATCH cx_root.
+            ENDTRY.
+
+            g_alv_grid->refresh_table_display(
+              EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+
             TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
           ENDIF.
 
+          " KHÔNG xóa NEWREC ở đây. on_save sẽ xóa NEWREC SAU KHI COMMIT thành công.
+
+        "==================================================================
         WHEN OTHERS.
-          " Chỉ refresh cho chắc
+        "==================================================================
           IF g_alv_grid IS BOUND.
             g_alv_grid->refresh_table_display(
               EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
@@ -2063,6 +2286,8 @@ MODULE pai_0100 INPUT.
 
   cl_gui_cfw=>flush( ).
 ENDMODULE.
+
+
 
 
 
@@ -2228,7 +2453,7 @@ FORM apply_editability_and_push.
     <row_color> = lt_scol.
   ENDLOOP.
 
-" 3) Đẩy xuống frontend & refresh
+  " 3) Đẩy xuống frontend & refresh
   PERFORM dedup_fieldcat.
 
   IF g_alv_grid IS BOUND.
@@ -2240,6 +2465,8 @@ FORM apply_editability_and_push.
       EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
   ENDIF.
 ENDFORM.
+
+
 
 FORM stay_in_edit_and_focus.
   FIELD-SYMBOLS: <lt>     TYPE STANDARD TABLE,
@@ -2282,6 +2509,21 @@ FORM stay_in_edit_and_focus.
   cl_gui_cfw=>flush( ).
 ENDFORM.
 
+FORM build_excluding_toolbar.
+  CLEAR gt_tb_excl.
+  " Nút thao tác cục bộ trên lưới
+  APPEND cl_gui_alv_grid=>mc_fc_loc_insert_row TO gt_tb_excl.
+  APPEND cl_gui_alv_grid=>mc_fc_loc_delete_row TO gt_tb_excl.
+  APPEND cl_gui_alv_grid=>mc_fc_loc_append_row  TO gt_tb_excl.
+  APPEND cl_gui_alv_grid=>mc_fc_loc_copy_row    TO gt_tb_excl.
+  APPEND cl_gui_alv_grid=>mc_fc_loc_copy       TO gt_tb_excl.
+  APPEND cl_gui_alv_grid=>mc_fc_loc_paste      TO gt_tb_excl.
+  APPEND cl_gui_alv_grid=>mc_fc_loc_cut        TO gt_tb_excl.
+  APPEND cl_gui_alv_grid=>mc_fc_loc_undo       TO gt_tb_excl.
+
+ENDFORM.
+
+
 *=====================================================================*
 * INCLUDE ZFA25SAP23_IO - Đọc / Upload dữ liệu Excel (.XLSX, .XLS)
 *=====================================================================*
@@ -2292,6 +2534,9 @@ TYPES: BEGIN OF alsmex_tabline,
          value TYPE string,
        END OF alsmex_tabline.
 TYPES: ty_t_alsmex_tab TYPE STANDARD TABLE OF alsmex_tabline WITH DEFAULT KEY.
+DATA: lv_date TYPE d,
+      lv_time TYPE t,
+      lr_desc TYPE REF TO cl_abap_tabledescr.
 
 *---------------------------------------------------------------------*
 * FORM read_xlsx_clfdt - Đọc file .XLSX bằng class CL_FDT_XL_SPREADSHEET
@@ -2423,7 +2668,7 @@ ENDFORM.
 * FORM upload_data_strict_match - Upload Excel → ALV data
 *---------------------------------------------------------------------*
 FORM upload_data_strict_match.
-
+  gv_in_upload = abap_true. " 🔹 Đánh dấu đang upload
   TYPES: BEGIN OF alsmex_tabline,
            row   TYPE i,
            col   TYPE i,
@@ -2465,7 +2710,15 @@ FORM upload_data_strict_match.
   ENDIF.
 
   lv_filename = ls_file-filename.
+"=== Tạo bảng tạm chứa dữ liệu Excel ===
+DATA: lr_upload TYPE REF TO data,
+      lr_desc   TYPE REF TO cl_abap_tabledescr.
 
+FIELD-SYMBOLS: <lt_upload> TYPE STANDARD TABLE.
+
+lr_desc ?= cl_abap_tabledescr=>describe_by_data_ref( gr_data ).
+CREATE DATA lr_upload TYPE HANDLE lr_desc.
+ASSIGN lr_upload->* TO <lt_upload>.
   "=== 2) Đọc dữ liệu Excel ===
   IF lv_filename CP '*.xlsx' OR lv_filename CP '*.XLSX'.
     PERFORM read_xlsx_clfdt USING lv_filename CHANGING lr_cells lt_header.
@@ -2496,16 +2749,20 @@ FORM upload_data_strict_match.
         lt_missing     TYPE STANDARD TABLE OF string,
         lt_extra       TYPE STANDARD TABLE OF string.
 
-  "--- Lấy metadata từ DDIC ---
-  CALL FUNCTION 'DDIF_FIELDINFO_GET'
-    EXPORTING
-      tabname        = p_tab
-    TABLES
-      dfies_tab      = lt_ddic_fields
-    EXCEPTIONS
-      not_found      = 1
-      internal_error = 2
-      OTHERS         = 3.
+  "=== 3a) Lấy metadata & fieldcatalog chuẩn từ ZEDIT_DDIC ===
+  DATA: lt_dfies     TYPE STANDARD TABLE OF dfies,
+        lt_keys_meta TYPE STANDARD TABLE OF dd03l-fieldname.
+
+  PERFORM get_metadata USING p_tab CHANGING lt_dfies.
+
+  "--- Lấy key fields (tự SELECT ra) ---
+  SELECT fieldname FROM dd03l INTO TABLE @lt_keys_meta
+    WHERE tabname = @p_tab AND keyflag = 'X' AND fieldname <> 'MANDT'.
+
+  PERFORM build_fieldcat_all.
+  gt_key_fields = lt_keys_meta.
+
+  lt_ddic_fields = lt_dfies.
 
   IF sy-subrc <> 0 OR lt_ddic_fields IS INITIAL.
     MESSAGE |Không lấy được metadata của bảng { p_tab }| TYPE 'S' DISPLAY LIKE 'E'.
@@ -2513,8 +2770,8 @@ FORM upload_data_strict_match.
   ENDIF.
 
   "--- Bỏ các field kỹ thuật không cần upload ---
-  DELETE lt_ddic_fields WHERE fieldname = 'MANDT' OR keyflag = 'X'.
-
+*  DELETE lt_ddic_fields WHERE fieldname = 'MANDT' OR keyflag = 'X'.
+  DELETE lt_ddic_fields WHERE fieldname = 'MANDT'.
   "--- Chuẩn hóa tên header Excel ---
   LOOP AT lt_header INTO DATA(lv_header_norm).
     lv_header_norm = to_upper( condense( lv_header_norm ) ).
@@ -2578,16 +2835,16 @@ FORM upload_data_strict_match.
     RETURN.
   ENDIF.
 
-  CLEAR <lt_data>.
+*  CLEAR <lt_data>.
 
-  " Cache metadata của bảng để tránh gọi lại mỗi cell
-  CALL FUNCTION 'DDIF_FIELDINFO_GET'
-    EXPORTING
-      tabname   = p_tab
-    TABLES
-      dfies_tab = lt_ddic_fields
-    EXCEPTIONS
-      OTHERS    = 1.
+*  " Cache metadata của bảng để tránh gọi lại mỗi cell
+*  CALL FUNCTION 'DDIF_FIELDINFO_GET'
+*    EXPORTING
+*      tabname   = p_tab
+*    TABLES
+*      dfies_tab = lt_ddic_fields
+*    EXCEPTIONS
+*      OTHERS    = 1.
 
   LOOP AT <lt_str> INTO DATA(ls_cell) WHERE row > 1.
     READ TABLE lt_header INDEX ls_cell-col INTO DATA(lv_hdr_fieldname).
@@ -2595,30 +2852,81 @@ FORM upload_data_strict_match.
       CONTINUE.
     ENDIF.
 
-    " Chuẩn hóa tên field
-    lv_fieldname = to_upper( condense( lv_hdr_fieldname ) ).
-    REPLACE ALL OCCURRENCES OF '_' IN lv_hdr_fieldname WITH ''.
-    CONDENSE lv_hdr_fieldname NO-GAPS.
+*    " Chuẩn hóa tên field
+*    lv_fieldname = to_upper( condense( lv_hdr_fieldname ) ).
+*    REPLACE ALL OCCURRENCES OF '_' IN lv_hdr_fieldname WITH ''.
+*    CONDENSE lv_hdr_fieldname NO-GAPS.
+*
+*    READ TABLE gt_fieldnames INTO DATA(lv_real_field) WITH KEY table_line = lv_hdr_fieldname.
+*    IF sy-subrc <> 0.
+*      CONTINUE.
+*    ENDIF.
+    "=== Chuẩn hóa tên field từ header Excel ===
+    DATA(lv_field_excel) = lv_hdr_fieldname.
+    TRANSLATE lv_field_excel TO UPPER CASE.
+    CONDENSE lv_field_excel NO-GAPS.
+    REPLACE ALL OCCURRENCES OF '_' IN lv_field_excel WITH ''.
+    CONDENSE lv_field_excel NO-GAPS.
 
-    READ TABLE gt_fieldnames INTO DATA(lv_real_field) WITH KEY table_line = lv_hdr_fieldname.
-    IF sy-subrc <> 0.
+
+    "=== Map tên field Excel sang field DDIC ===
+    DATA(lv_real_field) = lv_fieldname.
+
+    " Kiểm tra có trong danh sách field DDIC không
+    DATA(lv_in_ddic) = abap_false.
+    LOOP AT lt_ddic_fields INTO DATA(ls_check_field) WHERE fieldname = lv_real_field.
+      lv_in_ddic = abap_true.
+      EXIT.
+    ENDLOOP.
+
+    READ TABLE gt_fieldnames TRANSPORTING NO FIELDS WITH KEY table_line = lv_real_field.
+
+    IF sy-subrc <> 0 AND lv_in_ddic = abap_false.
+      " Nếu header không tồn tại trong DDIC → bỏ qua cell này
       CONTINUE.
     ENDIF.
 
-    READ TABLE <lt_data> INDEX ( ls_cell-row - 1 ) ASSIGNING <ls_data>.
+
+
+*    READ TABLE <lt_data> INDEX ( ls_cell-row - 1 ) ASSIGNING <ls_data>.
+*    IF sy-subrc <> 0.
+*      APPEND INITIAL LINE TO <lt_data> ASSIGNING <ls_data>.
+*    ENDIF.
+    DATA(lv_row) = ls_cell-row.
+
+    "=== Bỏ qua dòng header và dòng Excel trống ===
+    IF lv_row = 1.
+      CONTINUE. " Dòng tiêu đề
+    ENDIF.
+
+    DATA(lv_all_empty) = abap_true.
+    LOOP AT <lt_str> INTO DATA(ls_check) WHERE row = lv_row.
+      IF ls_check-value IS NOT INITIAL.
+        lv_all_empty = abap_false.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_all_empty = abap_true.
+      CONTINUE. " Bỏ qua dòng Excel trống
+    ENDIF.
+
+    READ TABLE <lt_upload> INDEX ( lv_row - 1 ) ASSIGNING <ls_data>.
     IF sy-subrc <> 0.
-      APPEND INITIAL LINE TO <lt_data> ASSIGNING <ls_data>.
+      APPEND INITIAL LINE TO <lt_upload> ASSIGNING <ls_data>.
     ENDIF.
 
 
+*    ASSIGN COMPONENT lv_real_field OF STRUCTURE <ls_data> TO <val>.
+    ASSIGN COMPONENT lv_field_excel OF STRUCTURE <ls_data> TO <val>.
 
-    ASSIGN COMPONENT lv_real_field OF STRUCTURE <ls_data> TO <val>.
+
     IF <val> IS ASSIGNED.
 
       "-----------------------------------------------------------
       " 🔹 [1] Lấy metadata field từ DDIC
       "-----------------------------------------------------------
-      READ TABLE lt_ddic_fields INTO DATA(ls_ddic) WITH KEY fieldname = lv_real_field.
+      READ TABLE lt_ddic_fields INTO DATA(ls_ddic) WITH KEY fieldname = lv_field_excel.
       IF sy-subrc <> 0.
         CONTINUE.
       ENDIF.
@@ -2664,20 +2972,12 @@ FORM upload_data_strict_match.
                 lv_valid = abap_false.
             ENDTRY.
           ENDIF.
-
-*        WHEN 'I' OR 'P' OR 'F' OR 'INT1' OR 'INT2' OR 'INT4' OR 'DEC' OR 'CURR' OR 'QUAN'.
-*          TRY.
-*              DATA(lv_num) = lv_val_excel.
-*            CATCH cx_sy_conversion_no_number.
-*              lv_valid = abap_false.
-*          ENDTRY.
         WHEN 'I' OR 'P' OR 'F' OR 'INT1' OR 'INT2' OR 'INT4' OR 'DEC' OR 'CURR' OR 'QUAN'.
           TRY.
               lv_val_excel = lv_val_excel + 0.
             CATCH cx_sy_conversion_no_number cx_sy_conversion_error.
               lv_valid = abap_false.
           ENDTRY.
-*        WHEN 'N'. " NUMC
         WHEN 'N'. " NUMC
           lv_val_excel = condense( to_upper( lv_val_excel ) ).
           IF lv_val_excel IS NOT INITIAL AND NOT lv_val_excel CO '0123456789'.
@@ -2749,6 +3049,99 @@ FORM upload_data_strict_match.
       ENDTRY.
     ENDIF.
   ENDLOOP.
+  "=== ✅ STEP 3: Merge dữ liệu Excel vào ALV hiện tại (preview) ===
+FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
+ASSIGN gr_data->* TO <lt_alv>.
+
+IF <lt_alv> IS ASSIGNED.
+
+  "--- Sao bản ALV cũ
+DATA: lr_old  TYPE REF TO data.
+
+
+FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE.
+
+" Lấy mô tả kiểu từ ALV chính
+lr_desc ?= cl_abap_tabledescr=>describe_by_data_ref( gr_data ).
+
+" Tạo bảng mới cùng kiểu
+CREATE DATA lr_old TYPE HANDLE lr_desc.
+ASSIGN lr_old->* TO <lt_old>.
+
+<lt_old> = <lt_alv>.
+
+
+  "--- Bảng merge kết quả
+DATA lr_merge TYPE REF TO data.
+FIELD-SYMBOLS: <lt_merge> TYPE STANDARD TABLE.
+
+" Sử dụng lại lr_desc đã có (được mô tả từ gr_data)
+CREATE DATA lr_merge TYPE HANDLE lr_desc.
+ASSIGN lr_merge->* TO <lt_merge>.
+
+
+  "--- 1) Giữ lại dòng cũ không có trong Excel
+  LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old>).
+    DATA(lv_exist) = abap_false.
+    LOOP AT <lt_upload> ASSIGNING FIELD-SYMBOL(<ls_up>).
+      DATA(lv_samekey) = abap_true.
+      LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld>).
+        FIELD-SYMBOLS: <v1> TYPE any, <v2> TYPE any.
+        ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_old> TO <v1>.
+        ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_up>  TO <v2>.
+        IF |{ <v1> }| <> |{ <v2> }|.
+          lv_samekey = abap_false.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+      IF lv_samekey = abap_true.
+        lv_exist = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    IF lv_exist = abap_false.
+      APPEND <ls_old> TO <lt_merge>.
+    ENDIF.
+  ENDLOOP.
+
+  "--- 2) Thêm hoặc cập nhật dòng từ Excel
+  LOOP AT <lt_upload> ASSIGNING FIELD-SYMBOL(<ls_new>).
+    DATA(lv_found) = abap_false.
+    LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old2>).
+      DATA(lv_match) = abap_true.
+      LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld2>).
+        FIELD-SYMBOLS: <vo> TYPE any, <vn> TYPE any.
+        ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_old2> TO <vo>.
+        ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_new>  TO <vn>.
+        IF |{ <vo> }| <> |{ <vn> }|.
+          lv_match = abap_false.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+      IF lv_match = abap_true.
+        APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_m>).
+        MOVE-CORRESPONDING <ls_old2> TO <ls_m>.
+        MOVE-CORRESPONDING <ls_new>  TO <ls_m>.
+        lv_found = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    IF lv_found = abap_false.
+      APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_add>).
+      MOVE-CORRESPONDING <ls_new> TO <ls_add>.
+    ENDIF.
+  ENDLOOP.
+
+  "--- Gán lại dữ liệu preview
+  <lt_alv> = <lt_merge>.
+ENDIF.
+
+"--- Refresh hiển thị preview
+PERFORM set_color.
+IF g_alv_grid IS BOUND.
+  g_alv_grid->refresh_table_display(
+    EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+ENDIF.
 
   "-----------------------------------------------------------
   " 🔹 [5] Kiểm tra trùng khóa chính trong Excel
@@ -2855,159 +3248,274 @@ FORM upload_data_strict_match.
       <newrec> = 'X'.
     ENDIF.
   ENDLOOP.
-  "=== 7c) Cập nhật logic insert/update cho 6 field audit ===
-  DATA: lv_tabname TYPE tabname,
-        lv_user    TYPE sy-uname,
-        lv_tzone   TYPE tznzone VALUE 'UTC+7',
-        lv_ts      TYPE timestamp.
+*  "=== 7c) Cập nhật logic insert/update cho 6 field audit ===
+*  DATA: lv_tabname TYPE tabname,
+*        lv_user    TYPE sy-uname,
+*        lv_tzone   TYPE tznzone,
+*        lv_ts      TYPE timestamp.
+*
+*
+*  lv_tabname = p_tab.
+*  lv_user = sy-uname.
+*
+*  " Lấy timezone thật của user (ví dụ ICT cho Việt Nam)
+*  TRY.
+*      lv_tzone = cl_abap_context_info=>get_user_time_zone( ).
+*    CATCH cx_abap_context_info_error.
+*      lv_tzone = 'UTC'. " fallback
+*  ENDTRY.
+*
+*  " Chuyển UTC sang giờ địa phương
+*  GET TIME STAMP FIELD lv_ts.
+*  CONVERT TIME STAMP lv_ts TIME ZONE lv_tzone INTO DATE lv_date TIME lv_time.
+*
+*
+*  " Lấy mô tả cấu trúc bảng đích
+*  DATA(lo_struct) = CAST cl_abap_structdescr( cl_abap_typedescr=>describe_by_name( lv_tabname ) ).
+*  DATA lr_db TYPE REF TO data.
+*  CREATE DATA lr_db TYPE HANDLE lo_struct.
+*
+*  LOOP AT <lt_data> ASSIGNING <ls_data>.
+*    FIELD-SYMBOLS: <ls_db>   TYPE any,
+*                   <val_new> TYPE any,
+*                   <val_old> TYPE any.
+*
+*    " Tạo bản ghi động theo cấu trúc bảng
+*    CREATE DATA lr_db TYPE HANDLE lo_struct.
+*    ASSIGN lr_db->* TO <ls_db>.
+*
+*    " Xây WHERE theo key
+*    DATA(lv_where) = VALUE string( ).
+*    LOOP AT lt_ddic_fields INTO DATA(ls_field) WHERE keyflag = 'X' AND fieldname <> 'MANDT'.
+*      ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_key>).
+*      IF <lv_key> IS ASSIGNED.
+*        IF lv_where IS INITIAL.
+*          lv_where = |{ ls_field-fieldname } = '{ <lv_key> }'|.
+*        ELSE.
+*          lv_where = |{ lv_where } AND { ls_field-fieldname } = '{ <lv_key> }'|.
+*        ENDIF.
+*      ENDIF.
+*    ENDLOOP.
+*
+*    " Tìm record trong DB
+*    SELECT SINGLE * FROM (lv_tabname) INTO @<ls_db> WHERE (lv_where).
+*
+*    IF sy-subrc = 0.
+*      " --- Record đã có → kiểm tra thay đổi thực tế (ngoại trừ các field audit)
+*      DATA(lv_changed) = abap_false.
+*
+*      LOOP AT lt_ddic_fields INTO ls_field WHERE fieldname <> 'MANDT'.
+*        IF ls_field-fieldname CP 'AE*' OR ls_field-fieldname CP 'ER*'.
+*          CONTINUE.
+*        ENDIF.
+*
+*
+*
+*        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
+*        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db>  TO <val_old>.
+*
+*        IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
+*          DATA(lv_new_str) = |{ <val_new> }|.
+*          DATA(lv_old_str) = |{ <val_old> }|.
+*          CONDENSE lv_new_str.
+*          CONDENSE lv_old_str.
+*
+*          IF lv_new_str <> lv_old_str.
+*            <val_old> = <val_new>.
+*            lv_changed = abap_true.
+*          ENDIF.
+*        ENDIF.
+*      ENDLOOP.
+*
+*      " --- Nếu có thay đổi → cập nhật 3 cột Changed*, giữ nguyên Created*
+*      IF lv_changed = abap_true.
+*        ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat>).
+*        IF <lv_aedat> IS ASSIGNED. <lv_aedat> = lv_date. ENDIF.
+*
+*        ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim>).
+*        IF <lv_aetim> IS ASSIGNED. <lv_aetim> = lv_time. ENDIF.
+*
+*        ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam>).
+*        IF <lv_aenam> IS ASSIGNED. <lv_aenam> = lv_user. ENDIF.
+*
+*      ELSE.
+*        " --- Không thay đổi → giữ nguyên toàn bộ 6 field audit (copy lại từ DB)
+*        LOOP AT lt_ddic_fields INTO ls_field WHERE fieldname CP 'AE*' OR fieldname CP 'ER*'.
+*          ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db> TO <val_old>.
+*          ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
+*          IF <val_old> IS ASSIGNED AND <val_new> IS ASSIGNED.
+*            <val_new> = <val_old>.
+*          ENDIF.
+*        ENDLOOP.
+*      ENDIF.
+*
+*    ELSE.
+*      " --- Record mới → set 3 cột Create*, clear 3 cột Change*
+*      ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_erdat>).
+*      IF <lv_erdat> IS ASSIGNED. <lv_erdat> = lv_date. ENDIF.
+*
+*      ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ertim>).
+*      IF <lv_ertim> IS ASSIGNED. <lv_ertim> = lv_time. ENDIF.
+*
+*      ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ernam>).
+*      IF <lv_ernam> IS ASSIGNED. <lv_ernam> = lv_user. ENDIF.
+*
+*    ENDIF.
+*
+*
+*  ENDLOOP.
+*  "=== 🔹 Ghi dữ liệu thật xuống DB sau khi set audit ===
+*  CREATE DATA lr_db TYPE HANDLE lo_struct.
+*  FIELD-SYMBOLS: <ls_dbwa> TYPE any.
+*  ASSIGN lr_db->* TO <ls_dbwa>.
+*
+*  LOOP AT <lt_data> ASSIGNING <ls_data>.
+*    CLEAR <ls_dbwa>.
+*    " --- Copy chỉ các field có trong bảng DDIC ---
+*    MOVE-CORRESPONDING <ls_data> TO <ls_dbwa>.
+*
+*    " --- Update, nếu không có thì Insert ---
+*    UPDATE (lv_tabname) FROM <ls_dbwa>.
+*    IF sy-subrc <> 0.
+*      INSERT (lv_tabname) FROM <ls_dbwa>.
+*    ENDIF.
+*  ENDLOOP.
+*
+*  COMMIT WORK AND WAIT.
+
+*"=== ✅ Merge dữ liệu upload vào ALV hiện có (an toàn, không dump) ===
+*FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
+*ASSIGN gr_data->* TO <lt_alv>.
+*IF <lt_alv> IS NOT ASSIGNED.
+*  RETURN.
+*ENDIF.
+*
+*"--- Tạo bản sao tách biệt của ALV hiện tại ---
+*DATA: lr_old TYPE REF TO data,
+*      lr_desc TYPE REF TO cl_abap_tabledescr.
+*FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE.
+*
+*lr_desc ?= cl_abap_tabledescr=>describe_by_data_ref( gr_data ).
+*CREATE DATA lr_old TYPE HANDLE lr_desc.
+*ASSIGN lr_old->* TO <lt_old>.
+*<lt_old> = <lt_alv>. " copy an toàn
+*
+*"--- Làm trống ALV để merge mới ---
+**REFRESH <lt_alv>.
+*
+*"--- Dùng tạm bảng trung gian để chứa kết quả merge ---
+*DATA: lr_merge TYPE REF TO data.
+*CREATE DATA lr_merge TYPE HANDLE lr_desc.
+*FIELD-SYMBOLS: <lt_merge> TYPE STANDARD TABLE.
+*ASSIGN lr_merge->* TO <lt_merge>.
+*
+*"--- 1) Giữ lại dòng cũ không có trong Excel ---
+*LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old>).
+*  DATA(lv_exist) = abap_false.
+*
+*  LOOP AT <lt_data> ASSIGNING FIELD-SYMBOL(<ls_up>).
+*    DATA(lv_match) = abap_true.
+*
+*    LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld>).
+*      FIELD-SYMBOLS: <v_old> TYPE any, <v_up> TYPE any.
+*      ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_old> TO <v_old>.
+*      ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_up>  TO <v_up>.
+*      IF <v_old> <> <v_up>.
+*        lv_match = abap_false.
+*        EXIT.
+*      ENDIF.
+*    ENDLOOP.
+*
+*    IF lv_match = abap_true.
+*      lv_exist = abap_true.
+*      EXIT.
+*    ENDIF.
+*  ENDLOOP.
+*
+*  IF lv_exist = abap_false.
+*    APPEND <ls_old> TO <lt_merge>.
+*  ENDIF.
+*ENDLOOP.
+*
+*"--- 2) Thêm hoặc cập nhật các dòng từ file Excel ---
+**LOOP AT <lt_data> ASSIGNING FIELD-SYMBOL(<ls_new>).
+**  APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_merge_row>).
+**  MOVE-CORRESPONDING <ls_new> TO <ls_merge_row>.
+**ENDLOOP.
+*"--- 2) Thêm hoặc cập nhật các dòng từ file Excel ---
+*LOOP AT <lt_data> ASSIGNING FIELD-SYMBOL(<ls_new>).
+*  DATA(lv_found) = abap_false.
+*
+*  LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old2>).
+*    DATA(lv_samekey) = abap_true.
+*
+*    LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld2>).
+*      FIELD-SYMBOLS: <v_old2> TYPE any, <v_new2> TYPE any.
+*      ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_old2> TO <v_old2>.
+*      ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_new>  TO <v_new2>.
+*      IF <v_old2> <> <v_new2>.
+*        lv_samekey = abap_false.
+*        EXIT.
+*      ENDIF.
+*    ENDLOOP.
+*
+*    IF lv_samekey = abap_true.
+*      " 🔹 Record trùng khóa → cập nhật field mới nhưng giữ field cũ
+*      APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_merge_row2>).
+*      MOVE-CORRESPONDING <ls_old2> TO <ls_merge_row2>.
+*      MOVE-CORRESPONDING <ls_new>  TO <ls_merge_row2>.
+*      lv_found = abap_true.
+*      EXIT.
+*    ENDIF.
+*  ENDLOOP.
+*
+*  IF lv_found = abap_false.
+*    " 🔹 Record hoàn toàn mới → thêm mới
+*    APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_merge_row3>).
+*    MOVE-CORRESPONDING <ls_new> TO <ls_merge_row3>.
+*  ENDIF.
+*ENDLOOP.
+*
+*
+*"--- 3) Copy ngược lại về ALV chính ---
+*<lt_alv> = <lt_merge>.
+*
+*"--- 4) Refresh ALV hiển thị ---
+*
+*IF g_alv_grid IS BOUND.
+*  g_alv_grid->refresh_table_display(
+*    EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+*ENDIF.
 
 
-  lv_tabname = p_tab.
-  lv_user = sy-uname.
-  GET TIME STAMP FIELD lv_ts.
-  CONVERT TIME STAMP lv_ts TIME ZONE lv_tzone INTO DATE lv_date TIME lv_time.
-
-  " Lấy mô tả cấu trúc bảng đích
-  DATA(lo_struct) = CAST cl_abap_structdescr( cl_abap_typedescr=>describe_by_name( lv_tabname ) ).
-  DATA lr_db TYPE REF TO data.
-  CREATE DATA lr_db TYPE HANDLE lo_struct.
-
-  LOOP AT <lt_data> ASSIGNING <ls_data>.
-    FIELD-SYMBOLS: <ls_db>   TYPE any,
-                   <val_new> TYPE any,
-                   <val_old> TYPE any.
-
-    " Tạo bản ghi động theo cấu trúc bảng
-    CREATE DATA lr_db TYPE HANDLE lo_struct.
-    ASSIGN lr_db->* TO <ls_db>.
-
-    " Xây WHERE theo key
-    DATA(lv_where) = VALUE string( ).
-    LOOP AT lt_ddic_fields INTO DATA(ls_field) WHERE keyflag = 'X' AND fieldname <> 'MANDT'.
-      ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_key>).
-      IF <lv_key> IS ASSIGNED.
-        IF lv_where IS INITIAL.
-          lv_where = |{ ls_field-fieldname } = '{ <lv_key> }'|.
-        ELSE.
-          lv_where = |{ lv_where } AND { ls_field-fieldname } = '{ <lv_key> }'|.
-        ENDIF.
-      ENDIF.
-    ENDLOOP.
-
-    " Tìm record trong DB
-    SELECT SINGLE * FROM (lv_tabname) INTO @<ls_db> WHERE (lv_where).
-
-    IF sy-subrc = 0.
-      " --- Record đã có → kiểm tra thay đổi thực tế (ngoại trừ các field audit)
-      DATA(lv_changed) = abap_false.
-
-LOOP AT lt_ddic_fields INTO ls_field WHERE fieldname <> 'MANDT'.
-  IF ls_field-fieldname CP 'AE*' OR ls_field-fieldname CP 'ER*'.
-    CONTINUE.
-  ENDIF.
 
 
 
-        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
-        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db>  TO <val_old>.
+*  "=== 🔄 Reload lại dữ liệu DB sau khi ghi ===
+*  DATA: lr_temp TYPE REF TO data.
+*  CREATE DATA lr_temp TYPE TABLE OF (lv_tabname).
+*  ASSIGN lr_temp->* TO FIELD-SYMBOL(<lt_temp>).
+*
+*  SELECT * FROM (lv_tabname) INTO TABLE @<lt_temp> BYPASSING BUFFER.
+*
+*  FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
+*  ASSIGN gr_data->* TO <lt_alv>.
+*
+*  IF <lt_alv> IS ASSIGNED.
+*    REFRESH <lt_alv>.
+*    LOOP AT <lt_temp> ASSIGNING FIELD-SYMBOL(<ls_temp>).
+*      APPEND INITIAL LINE TO <lt_alv> ASSIGNING FIELD-SYMBOL(<ls_alv>).
+*      MOVE-CORRESPONDING <ls_temp> TO <ls_alv>.
+*    ENDLOOP.
+*
+*    PERFORM merge_audit_log USING lv_tabname CHANGING <lt_alv>.
+*  ENDIF.
+*
+*  IF g_alv_grid IS BOUND.
+*    g_alv_grid->refresh_table_display(
+*      EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+*  ENDIF.
 
-        IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
-          DATA(lv_new_str) = |{ <val_new> }|.
-          DATA(lv_old_str) = |{ <val_old> }|.
-          CONDENSE lv_new_str.
-          CONDENSE lv_old_str.
-
-          IF lv_new_str <> lv_old_str.
-            <val_old> = <val_new>.
-            lv_changed = abap_true.
-          ENDIF.
-        ENDIF.
-      ENDLOOP.
-
-      " --- Nếu có thay đổi → cập nhật 3 cột Changed*, giữ nguyên Created*
-      IF lv_changed = abap_true.
-        ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat>).
-        IF <lv_aedat> IS ASSIGNED. <lv_aedat> = lv_date. ENDIF.
-
-        ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim>).
-        IF <lv_aetim> IS ASSIGNED. <lv_aetim> = lv_time. ENDIF.
-
-        ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam>).
-        IF <lv_aenam> IS ASSIGNED. <lv_aenam> = lv_user. ENDIF.
-
-      ELSE.
-        " --- Không thay đổi → giữ nguyên toàn bộ 6 field audit (copy lại từ DB)
-        LOOP AT lt_ddic_fields INTO ls_field WHERE fieldname CP 'AE*' OR fieldname CP 'ER*'.
-          ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db> TO <val_old>.
-          ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
-          IF <val_old> IS ASSIGNED AND <val_new> IS ASSIGNED.
-            <val_new> = <val_old>.
-          ENDIF.
-        ENDLOOP.
-      ENDIF.
-
-    ELSE.
-      " --- Record mới → set 3 cột Create*, clear 3 cột Change*
-      ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_erdat>).
-      IF <lv_erdat> IS ASSIGNED. <lv_erdat> = lv_date. ENDIF.
-
-      ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ertim>).
-      IF <lv_ertim> IS ASSIGNED. <lv_ertim> = lv_time. ENDIF.
-
-      ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ernam>).
-      IF <lv_ernam> IS ASSIGNED. <lv_ernam> = lv_user. ENDIF.
-
-    ENDIF.
-
-
-  ENDLOOP.
-   "=== 🔹 Ghi dữ liệu thật xuống DB sau khi set audit ===
-  CREATE DATA lr_db TYPE HANDLE lo_struct.
-  FIELD-SYMBOLS: <ls_dbwa> TYPE any.
-  ASSIGN lr_db->* TO <ls_dbwa>.
-
-  LOOP AT <lt_data> ASSIGNING <ls_data>.
-    CLEAR <ls_dbwa>.
-    " --- Copy chỉ các field có trong bảng DDIC ---
-    MOVE-CORRESPONDING <ls_data> TO <ls_dbwa>.
-
-    " --- Update, nếu không có thì Insert ---
-    UPDATE (lv_tabname) FROM <ls_dbwa>.
-    IF sy-subrc <> 0.
-      INSERT (lv_tabname) FROM <ls_dbwa>.
-    ENDIF.
-  ENDLOOP.
-
-  COMMIT WORK AND WAIT.
-
-
-
-
-
-   "=== 🔄 Reload lại dữ liệu DB sau khi ghi ===
-  DATA: lr_temp TYPE REF TO data.
-  CREATE DATA lr_temp TYPE TABLE OF (lv_tabname).
-  ASSIGN lr_temp->* TO FIELD-SYMBOL(<lt_temp>).
-
-  SELECT * FROM (lv_tabname) INTO TABLE @<lt_temp> BYPASSING BUFFER.
-
-  FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
-  ASSIGN gr_data->* TO <lt_alv>.
-
-  IF <lt_alv> IS ASSIGNED.
-    REFRESH <lt_alv>.
-    LOOP AT <lt_temp> ASSIGNING FIELD-SYMBOL(<ls_temp>).
-      APPEND INITIAL LINE TO <lt_alv> ASSIGNING FIELD-SYMBOL(<ls_alv>).
-      MOVE-CORRESPONDING <ls_temp> TO <ls_alv>.
-    ENDLOOP.
-
-    PERFORM merge_audit_log USING lv_tabname CHANGING <lt_alv>.
-  ENDIF.
-
-  IF g_alv_grid IS BOUND.
-    g_alv_grid->refresh_table_display(
-      EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-  ENDIF.
 
 
 
@@ -3018,15 +3526,6 @@ LOOP AT lt_ddic_fields INTO ls_field WHERE fieldname <> 'MANDT'.
     MESSAGE 'Không có dữ liệu hợp lệ sau upload!' TYPE 'S' DISPLAY LIKE 'E'.
     RETURN.
   ENDIF.
-*  DATA(lv_err) = VALUE string( ).
-*  PERFORM upload_save_data USING p_tab CHANGING <lt_data> lv_err lv_msg.
-*
-*  IF lv_err IS NOT INITIAL.
-*    MESSAGE lv_err TYPE 'S' DISPLAY LIKE 'E'.
-*  ELSE.
-*    MESSAGE lv_msg TYPE 'S'.
-*  ENDIF.
-
   PERFORM set_color.
 
   DESCRIBE TABLE <lt_data> LINES lv_count.
@@ -3045,8 +3544,10 @@ LOOP AT lt_ddic_fields INTO ls_field WHERE fieldname <> 'MANDT'.
         MESSAGE lx_err->get_text( ) TYPE 'S' DISPLAY LIKE 'E'.
     ENDTRY.
   ENDIF.
-
+  PERFORM apply_editability_and_push.
+  gv_in_upload = abap_false.
 ENDFORM.
+
 
 
 FORM download_template_xlsx.
@@ -3131,439 +3632,125 @@ FORM download_template_xlsx.
 
 ENDFORM.
 
-*FORM upload_save_data USING p_tab TYPE tabname
-*CHANGING pt_data TYPE STANDARD TABLE
-*                  pv_err TYPE string
-*                  pv_msg TYPE string.
-*
-*  FIELD-SYMBOLS: <lt_data> TYPE STANDARD TABLE,
-*                 <ls_row>  TYPE any,
-*                 <ls_wa>   TYPE any.
-*
-*  DATA: lv_tabname TYPE tabname,
-*        lv_count   TYPE i,
-*        lr_wa      TYPE REF TO data.
-*
-*  lv_tabname = p_tab.
-*
-*  ASSIGN pt_data TO <lt_data>.
-*  IF <lt_data> IS NOT ASSIGNED OR <lt_data> IS INITIAL.
-*    pv_err = 'Không có dữ liệu hợp lệ để ghi vào DB.'.
-*    RETURN.
-*  ENDIF.
-*
-*  "--- tạo work area có kiểu tĩnh tương ứng
-*  DATA lo_descr TYPE REF TO cl_abap_typedescr.
-*  DATA lo_struct TYPE REF TO cl_abap_structdescr.
-*
-*  lo_descr = cl_abap_typedescr=>describe_by_name( lv_tabname ).
-*  lo_struct ?= lo_descr.
-*
-*  CREATE DATA lr_wa TYPE HANDLE lo_struct.
-*  ASSIGN lr_wa->* TO <ls_wa>.
-*
-*  TRY.
-*      LOOP AT <lt_data> ASSIGNING <ls_row>.
-*        MOVE-CORRESPONDING <ls_row> TO <ls_wa>.
-*        INSERT (lv_tabname) FROM <ls_wa>.
-*        COMMIT WORK AND WAIT.
-*      ENDLOOP.
-*
-*      IF sy-subrc = 0.
-*        COMMIT WORK AND WAIT.
-*        DESCRIBE TABLE <lt_data> LINES lv_count.
-*        pv_msg = |Đã lưu thành công { lv_count } dòng dữ liệu vào { lv_tabname }.|.
-*
-*        "=== Reload lại dữ liệu từ DB ===
-*        FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
-*        ASSIGN gr_data->* TO <lt_alv>.
-*
-*        IF <lt_alv> IS ASSIGNED.
-*          DATA lr_temp TYPE REF TO data.
-*          FIELD-SYMBOLS: <lt_temp> TYPE STANDARD TABLE,
-*                         <ls_temp> TYPE any,
-*                         <ls_alv>  TYPE any.
-*
-*          "Tạo table tạm có cùng cấu trúc DB
-*          CREATE DATA lr_temp TYPE TABLE OF (lv_tabname).
-*          ASSIGN lr_temp->* TO <lt_temp>.
-*
-*          "Đọc lại toàn bộ dữ liệu từ DB
-*          SELECT * FROM (lv_tabname) INTO TABLE <lt_temp>.
-*
-*          "Xóa dữ liệu ALV cũ
-*          REFRESH <lt_alv>.
-*
-*          "Chép dữ liệu DB vào ALV (dùng MOVE-CORRESPONDING để tránh dump)
-*          LOOP AT <lt_temp> ASSIGNING <ls_temp>.
-*            APPEND INITIAL LINE TO <lt_alv> ASSIGNING <ls_alv>.
-*            MOVE-CORRESPONDING <ls_temp> TO <ls_alv>.
-*          ENDLOOP.
-*        ENDIF.
-*
-*        "=== Refresh lại ALV grid để hiển thị ngay dữ liệu ===
-*        IF g_alv_grid IS BOUND.
-*          g_alv_grid->refresh_table_display(
-*            EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' )
-*          ).
-*        ENDIF.
-*
-*      ELSE.
-*        pv_err = |Không thể ghi dữ liệu vào bảng { lv_tabname }.|.
-*      ENDIF.
-*
-*    CATCH cx_sy_dynamic_osql_error INTO DATA(lx_sql).
-*      pv_err = lx_sql->get_text( ).
-*  ENDTRY.
-*
-*ENDFORM.
-
-
-FORM upload_save_data USING p_tab TYPE tabname
-CHANGING pt_data TYPE STANDARD TABLE
-                  pv_err TYPE string
-                  pv_msg TYPE string.
-
-  FIELD-SYMBOLS: <lt_data> TYPE STANDARD TABLE,
-                 <ls_row>  TYPE any,
-                 <ls_db>   TYPE any,
-                 <ls_wa>   TYPE any,
-                 <val_new> TYPE any,
-                 <val_old> TYPE any.
-
-  DATA: lv_tabname TYPE tabname,
-        lv_count   TYPE i,
-        lr_wa      TYPE REF TO data,
-        lr_db      TYPE REF TO data,
-        lr_temp    TYPE REF TO data,
-        lv_where   TYPE string.
-  lv_tabname = p_tab.
-  ASSIGN pt_data TO <lt_data>.
-  IF <lt_data> IS NOT ASSIGNED OR <lt_data> IS INITIAL.
-    pv_err = 'Không có dữ liệu hợp lệ để ghi vào DB.'.
-    RETURN.
-  ENDIF.
-
-  "--- Lấy mô tả cấu trúc của bảng đích
-  DATA(lo_struct) = CAST cl_abap_structdescr( cl_abap_typedescr=>describe_by_name( lv_tabname ) ).
-  CREATE DATA lr_wa TYPE HANDLE lo_struct.
-  ASSIGN lr_wa->* TO <ls_wa>.
-
-  "--- Lấy key fields
-  DATA: lt_ddic_fields TYPE STANDARD TABLE OF dfies,
-        lt_key_fields  TYPE STANDARD TABLE OF string,
-        ls_ddic_field  TYPE dfies.
-
-  CALL FUNCTION 'DDIF_FIELDINFO_GET'
-    EXPORTING
-      tabname   = lv_tabname
-    TABLES
-      dfies_tab = lt_ddic_fields
-    EXCEPTIONS
-      OTHERS    = 1.
-
-  LOOP AT lt_ddic_fields INTO ls_ddic_field WHERE keyflag = 'X' AND fieldname <> 'MANDT'.
-    APPEND ls_ddic_field-fieldname TO lt_key_fields.
-  ENDLOOP.
-
-  "--- Chuẩn bị thời gian & user (timezone VN)
-  DATA: lv_user  TYPE sy-uname,
-        lv_tzone TYPE tznzone VALUE 'UTC+7',
-        lv_ts    TYPE timestamp,
-        lv_date  TYPE d,
-        lv_time  TYPE t.
-  lv_user = sy-uname.
-  GET TIME STAMP FIELD lv_ts.
-  CONVERT TIME STAMP lv_ts TIME ZONE lv_tzone INTO DATE lv_date TIME lv_time.
-
-  TRY.
-      LOOP AT <lt_data> ASSIGNING <ls_row>.
-        ASSIGN COMPONENT 'IS_ERROR' OF STRUCTURE <ls_row> TO FIELD-SYMBOL(<lv_err_flag>).
-        IF <lv_err_flag> IS ASSIGNED AND <lv_err_flag> = 'X'.
-          CONTINUE.
-        ENDIF.
-
-        "--- Xây WHERE từ key
-        CLEAR lv_where.
-        LOOP AT lt_key_fields INTO DATA(lv_key).
-          ASSIGN COMPONENT lv_key OF STRUCTURE <ls_row> TO FIELD-SYMBOL(<lv_kval>).
-          IF <lv_kval> IS ASSIGNED.
-            IF lv_where IS INITIAL.
-              lv_where = |{ lv_key } = '{ <lv_kval> }'|.
-            ELSE.
-              lv_where = |{ lv_where } AND { lv_key } = '{ <lv_kval> }'|.
-            ENDIF.
-          ENDIF.
-        ENDLOOP.
-
-        "--- Lấy bản ghi DB (nếu có)
-        CREATE DATA lr_db TYPE HANDLE lo_struct.
-        ASSIGN lr_db->* TO <ls_db>.
-        SELECT SINGLE * FROM (lv_tabname) INTO @<ls_db> WHERE (lv_where).
-
-        IF sy-subrc = 0.
-          "=== Record có sẵn → kiểm tra thay đổi (bỏ qua các field audit)
-          DATA(lv_changed) = abap_false.
-
-          LOOP AT lt_ddic_fields INTO ls_ddic_field WHERE fieldname <> 'MANDT'.
-            ASSIGN COMPONENT ls_ddic_field-fieldname OF STRUCTURE <ls_row> TO <val_new>.
-            ASSIGN COMPONENT ls_ddic_field-fieldname OF STRUCTURE <ls_db>  TO <val_old>.
-
-            IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
-
-              " --- Bỏ qua các field audit để không kích hoạt false update
-              IF ls_ddic_field-fieldname CP 'AE*' OR ls_ddic_field-fieldname CP 'ER*'.
-                CONTINUE.
-              ENDIF.
-
-              IF <val_new> <> <val_old>.
-                <val_old> = <val_new>.
-                lv_changed = abap_true.
-              ENDIF.
-            ENDIF.
-          ENDLOOP.
-
-          "=== Chỉ khi có thay đổi thật thì mới gán lại Changed*
-          IF lv_changed = abap_true.
-            ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_db> TO FIELD-SYMBOL(<lv_aedat>).
-            IF <lv_aedat> IS ASSIGNED. <lv_aedat> = lv_date. ENDIF.
-
-            ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_db> TO FIELD-SYMBOL(<lv_aetim>).
-            IF <lv_aetim> IS ASSIGNED. <lv_aetim> = lv_time. ENDIF.
-
-            ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_db> TO FIELD-SYMBOL(<lv_aenam>).
-            IF <lv_aenam> IS ASSIGNED. <lv_aenam> = lv_user. ENDIF.
-
-            MOVE-CORRESPONDING <ls_db> TO <ls_wa>.
-            MODIFY (lv_tabname) FROM <ls_wa>.
-
-            "--- Audit log UPDATE
-            PERFORM log_audit_action USING lv_tabname 'U' <ls_wa>.
-          ENDIF.
-
-        ELSE.
-          "=== Record mới → INSERT
-          MOVE-CORRESPONDING <ls_row> TO <ls_wa>.
-
-          ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_wa> TO FIELD-SYMBOL(<lv_erdat>).
-          IF <lv_erdat> IS ASSIGNED. <lv_erdat> = lv_date. ENDIF.
-
-          ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_wa> TO FIELD-SYMBOL(<lv_ertim>).
-          IF <lv_ertim> IS ASSIGNED. <lv_ertim> = lv_time. ENDIF.
-
-          ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_wa> TO FIELD-SYMBOL(<lv_ernam>).
-          IF <lv_ernam> IS ASSIGNED. <lv_ernam> = lv_user. ENDIF.
-
-          INSERT (lv_tabname) FROM <ls_wa>.
-
-          "--- Audit log CREATE
-          PERFORM log_audit_action USING lv_tabname 'C' <ls_wa>.
-        ENDIF.
-
-
-      ENDLOOP.
-
-      COMMIT WORK AND WAIT.
-      "===============================================================
-      " Force reload dữ liệu mới nhất sau khi upload (bỏ cache/buffer)
-      "===============================================================
-      DATA: lr_flat TYPE REF TO data,
-            lo_tab  TYPE REF TO cl_abap_tabledescr,
-            lo_line TYPE REF TO cl_abap_structdescr.
-
-      TRY.
-          lo_line ?= cl_abap_structdescr=>describe_by_name( lv_tabname ).
-          lo_tab  = cl_abap_tabledescr=>create( p_line_type = lo_line ).
-          CREATE DATA lr_flat TYPE HANDLE lo_tab.
-
-          FIELD-SYMBOLS: <lt_flat> TYPE STANDARD TABLE,
-                         <ls_flat> TYPE any,
-                         <ls_data> TYPE any.
-
-          ASSIGN lr_flat->* TO <lt_flat>.
-
-          SELECT * FROM (lv_tabname)
-            INTO CORRESPONDING FIELDS OF TABLE @<lt_flat>
-            BYPASSING BUFFER.
-
-          REFRESH <lt_data>.
-          LOOP AT <lt_flat> ASSIGNING <ls_flat>.
-            APPEND INITIAL LINE TO <lt_data> ASSIGNING <ls_data>.
-            MOVE-CORRESPONDING <ls_flat> TO <ls_data>.
-          ENDLOOP.
-
-          PERFORM merge_audit_log USING lv_tabname CHANGING <lt_data>.
-        CATCH cx_root INTO DATA(lx_err).
-          MESSAGE lx_err->get_text( ) TYPE 'I'.
-      ENDTRY.
-      "--- Reload dữ liệu và merge audit
-      DESCRIBE TABLE <lt_data> LINES lv_count.
-      pv_msg = |Đã lưu thành công { lv_count } dòng dữ liệu vào { lv_tabname }.|.
-
-      FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
-      ASSIGN gr_data->* TO <lt_alv>.
-
-      IF <lt_alv> IS ASSIGNED.
-        CREATE DATA lr_temp TYPE TABLE OF (lv_tabname).
-        ASSIGN lr_temp->* TO FIELD-SYMBOL(<lt_temp>).
-
-        SELECT * FROM (lv_tabname) INTO TABLE @<lt_temp> BYPASSING BUFFER.
-
-        REFRESH <lt_alv>.
-        LOOP AT <lt_temp> ASSIGNING FIELD-SYMBOL(<ls_temp>).
-          APPEND INITIAL LINE TO <lt_alv> ASSIGNING FIELD-SYMBOL(<ls_alv>).
-          MOVE-CORRESPONDING <ls_temp> TO <ls_alv>.
-        ENDLOOP.
-
-        "--- Gộp lại audit log vào ALV hiển thị
-        PERFORM merge_audit_log USING lv_tabname CHANGING <lt_alv>.
-      ENDIF.
-
-      IF g_alv_grid IS BOUND.
-        g_alv_grid->refresh_table_display(
-          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-      ENDIF.
-
-    CATCH cx_sy_dynamic_osql_error INTO DATA(lx_sql).
-      pv_err = lx_sql->get_text( ).
-  ENDTRY.
-
-ENDFORM.
-
-
-
-
-
-
-
-
-
-
-*=====================================================================*
-* FORM download_excel_xlsx – Export dữ liệu ra Excel gồm 2 sheet *
-*=====================================================================*
 FORM download_excel_xlsx USING ir_data TYPE REF TO data.
-
-  TYPES: BEGIN OF ty_field_help,
-           fieldname TYPE string,
-           heading   TYPE string,
-           tooltip   TYPE string,
-         END OF ty_field_help.
 
   FIELD-SYMBOLS: <lt_original> TYPE STANDARD TABLE,
                  <ls_original> TYPE any,
                  <lt_no_style> TYPE STANDARD TABLE,
-                 <ls_no_style> TYPE any,
-                 <lt_help>     TYPE STANDARD TABLE,
-                 <ls_help>     TYPE any.
+                 <ls_no_style> TYPE any.
 
   DATA: lr_data_no_style TYPE REF TO data,
         lv_filename      TYPE string,
         lv_path          TYPE string,
         lv_fullpath      TYPE string,
         lv_action        TYPE i,
-        lv_xstring_data  TYPE xstring,
-        lv_xstring_help  TYPE xstring,
+        lv_xstring       TYPE xstring,
         lt_bin           TYPE solix_tab,
-        lt_cols_data     TYPE if_fdt_doc_spreadsheet=>t_column,
-        lt_cols_help     TYPE if_fdt_doc_spreadsheet=>t_column,
-        lt_help_raw      TYPE STANDARD TABLE OF ty_field_help,
-        lr_help_raw      TYPE REF TO data,
-        lt_meta          TYPE ddfields.
+        lt_cols          TYPE if_fdt_doc_spreadsheet=>t_column.
 
-  "== 1) Gọi hộp thoại chọn nơi lưu file ==
+  " 1) Hộp thoại lưu file
   cl_gui_frontend_services=>file_save_dialog(
-  EXPORTING
-  default_extension = 'xlsx'
-  default_file_name = |DATA_{ p_tab }_{ sy-datum }_{ sy-uzeit }.xlsx|
-  file_filter = 'Excel Files (*.xlsx)|*.xlsx'
-  CHANGING
-  filename = lv_filename
-  path = lv_path
-  fullpath = lv_fullpath
-  user_action = lv_action
-  EXCEPTIONS
-  OTHERS = 1 ).
+    EXPORTING
+      default_extension = 'xlsx'
+      default_file_name  = |DATA_{ p_tab }_{ sy-datum }_{ sy-uzeit }.xlsx|
+      file_filter        = 'Excel Files (*.xlsx) | *.xlsx'
+    CHANGING
+      filename     = lv_filename
+      path         = lv_path
+      fullpath     = lv_fullpath
+      user_action  = lv_action
+    EXCEPTIONS
+      OTHERS = 1 ).
 
   IF sy-subrc <> 0 OR lv_action <> cl_gui_frontend_services=>action_ok.
-    MESSAGE 'Export bị hủy' TYPE 'S'.
+    MESSAGE 'Export bị hủy' TYPE 'S' DISPLAY LIKE 'E'.
     RETURN.
   ENDIF.
 
-  "== 2) Chuẩn bị dữ liệu gốc (DATA sheet) ==
+  " 2) Loại bỏ style
   ASSIGN ir_data->* TO <lt_original>.
   IF <lt_original> IS NOT ASSIGNED.
-    MESSAGE 'Dữ liệu không hợp lệ' TYPE 'S'.
+    MESSAGE 'Dữ liệu gốc không được assign' TYPE 'S' DISPLAY LIKE 'E'.
     RETURN.
   ENDIF.
 
   PERFORM create_dynamic_itab_no_style USING p_tab CHANGING lr_data_no_style.
   ASSIGN lr_data_no_style->* TO <lt_no_style>.
+  IF <lt_no_style> IS NOT ASSIGNED.
+    MESSAGE 'Không tạo được cấu trúc dữ liệu cho export' TYPE 'S' DISPLAY LIKE 'E'.
+    RETURN.
+  ENDIF.
 
   LOOP AT <lt_original> ASSIGNING <ls_original>.
     APPEND INITIAL LINE TO <lt_no_style> ASSIGNING <ls_no_style>.
     MOVE-CORRESPONDING <ls_original> TO <ls_no_style>.
   ENDLOOP.
 
-  "== 3) Lấy metadata từ DDIC để tạo sheet mô tả ==
-  PERFORM get_metadata USING p_tab CHANGING lt_meta.
+  "=== Ẩn cột MANDT nếu có ===
+  DATA: lo_anydesc  TYPE REF TO cl_abap_typedescr,
+        lo_tabdesc  TYPE REF TO cl_abap_tabledescr,
+        lo_struct   TYPE REF TO cl_abap_structdescr,
+        lt_comp     TYPE abap_component_tab,
+        ls_comp     TYPE abap_componentdescr,
+        lo_newline  TYPE REF TO cl_abap_structdescr,
+        lo_newtab   TYPE REF TO cl_abap_tabledescr,
+        lr_filtered TYPE REF TO data.
 
-  LOOP AT lt_meta INTO DATA(ls_ddic).
-    APPEND VALUE ty_field_help(
-    fieldname = ls_ddic-fieldname
-    heading = ls_ddic-scrtext_l
-    tooltip = ls_ddic-scrtext_m ) TO lt_help_raw.
+  FIELD-SYMBOLS: <lt_filtered> TYPE STANDARD TABLE,
+                 <ls_filtered> TYPE any.
+
+  lo_anydesc = cl_abap_typedescr=>describe_by_data_ref( REF #( <lt_no_style> ) ).
+  lo_tabdesc ?= lo_anydesc.
+  lo_struct  ?= lo_tabdesc->get_table_line_type( ).
+  lt_comp    = lo_struct->get_components( ).
+
+  LOOP AT lt_comp INTO ls_comp.
+    IF ls_comp-name = 'MANDT' OR ls_comp-name = 'mandt'.
+      DELETE lt_comp INDEX sy-tabix.
+      EXIT.
+    ENDIF.
   ENDLOOP.
 
-  CREATE DATA lr_help_raw LIKE lt_help_raw.
-  ASSIGN lr_help_raw->* TO <lt_help>.
-  <lt_help> = lt_help_raw.
+  IF sy-subrc = 0.
+    lo_newline = cl_abap_structdescr=>create( lt_comp ).
+    lo_newtab  = cl_abap_tabledescr=>create( lo_newline ).
+    CREATE DATA lr_filtered TYPE HANDLE lo_newtab.
+    ASSIGN lr_filtered->* TO <lt_filtered>.
 
-  "== 4) Tạo sheet DATA ==
+    LOOP AT <lt_no_style> ASSIGNING <ls_no_style>.
+      APPEND INITIAL LINE TO <lt_filtered> ASSIGNING <ls_filtered>.
+      MOVE-CORRESPONDING <ls_no_style> TO <ls_filtered>.
+    ENDLOOP.
+
+    lr_data_no_style = lr_filtered.
+  ENDIF.
+
+  " 3) Xuất Excel
   TRY.
       cl_fdt_xl_spreadsheet=>if_fdt_doc_spreadsheet~create_document(
-      EXPORTING
-      columns = lt_cols_data
-      itab = lr_data_no_style
-      iv_call_type = 2
-      iv_sheet_name = 'DATA'
-      RECEIVING
-      xdocument = lv_xstring_data ).
-    CATCH cx_root INTO DATA(lx_data).
-      MESSAGE lx_data->get_text( ) TYPE 'S' DISPLAY LIKE 'E'.
+        EXPORTING
+          columns       = lt_cols
+          itab          = lr_data_no_style
+          iv_call_type  = 2
+          iv_sheet_name = 'DATA'
+        RECEIVING
+          xdocument     = lv_xstring ).
+    CATCH cx_root INTO DATA(lx).
+      MESSAGE lx->get_text( ) TYPE 'S' DISPLAY LIKE 'E'.
       RETURN.
   ENDTRY.
 
-  "== 5) Tạo sheet Input help ==
-  TRY.
-      cl_fdt_xl_spreadsheet=>if_fdt_doc_spreadsheet~create_document(
-      EXPORTING
-      columns = lt_cols_help
-      itab = lr_help_raw
-      iv_call_type = 2
-      iv_sheet_name = 'Input help'
-      RECEIVING
-      xdocument = lv_xstring_help ).
-    CATCH cx_root INTO DATA(lx_help).
-      MESSAGE lx_help->get_text( ) TYPE 'S' DISPLAY LIKE 'E'.
-      RETURN.
-  ENDTRY.
-
-  "== 6) Gộp tạm 2 xstring (không chuẩn multi-sheet nhưng chấp nhận được)==
-  CONCATENATE lv_xstring_data lv_xstring_help INTO lv_xstring_data IN BYTE MODE.
-
-  "== 7) Ghi file ra frontend ==
-  lt_bin = cl_bcs_convert=>xstring_to_solix( iv_xstring = lv_xstring_data ).
-
+  " 4) Ghi ra frontend
+  lt_bin = cl_bcs_convert=>xstring_to_solix( iv_xstring = lv_xstring ).
   cl_gui_frontend_services=>gui_download(
-  EXPORTING
-  filename = lv_fullpath
-  filetype = 'BIN'
-  bin_filesize = xstrlen( lv_xstring_data )
-  CHANGING
-  data_tab = lt_bin
-  EXCEPTIONS
-  OTHERS = 1 ).
+    EXPORTING
+      filename     = lv_fullpath
+      filetype     = 'BIN'
+      bin_filesize = xstrlen( lv_xstring )
+    CHANGING
+      data_tab     = lt_bin
+    EXCEPTIONS
+      OTHERS = 1 ).
 
   IF sy-subrc = 0.
     MESSAGE |Xuất dữ liệu thành công: { lv_filename }| TYPE 'S'.
@@ -3572,6 +3759,7 @@ FORM download_excel_xlsx USING ir_data TYPE REF TO data.
   ENDIF.
 
 ENDFORM.
+
 *---------------------------------------------------------------------*
 * FORM set_color – Tô màu dòng trong ALV sau khi upload
 *---------------------------------------------------------------------*
@@ -3640,6 +3828,7 @@ FORM set_color.
 ENDFORM.
 
 
+
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_AUDIT (classic-syntax, no templates/inline)
 *&---------------------------------------------------------------------*
@@ -3678,6 +3867,64 @@ FORM ensure_keys USING iv_tab TYPE tabname.
       ENDIF.
     ENDLOOP.
   ENDIF.
+ENDFORM.
+
+FORM ensure_rowcolor_component CHANGING cr_tab TYPE REF TO data.
+  DATA: lo_tab     TYPE REF TO cl_abap_tabledescr,
+        lo_line    TYPE REF TO cl_abap_structdescr,
+        lt_comp    TYPE abap_component_tab,
+        ls_comp    TYPE abap_componentdescr,
+        lo_any     TYPE REF TO cl_abap_typedescr,
+        lo_newline TYPE REF TO cl_abap_structdescr,
+        lo_newtab  TYPE REF TO cl_abap_tabledescr,
+        lr_new     TYPE REF TO data,
+        lr_row     TYPE REF TO data.
+
+  FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE,
+                 <lt_new> TYPE STANDARD TABLE,
+                 <ls_old> TYPE any,
+                 <ls_new> TYPE any.
+
+  IF cr_tab IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  " Mô tả kiểu hiện tại
+  lo_tab  ?= cl_abap_typedescr=>describe_by_data_ref( cr_tab ).
+  lo_line ?= lo_tab->get_table_line_type( ).
+  lt_comp  = lo_line->get_components( ).
+
+  " Đã có ROW_COLOR chưa?
+  LOOP AT lt_comp INTO ls_comp WHERE name = 'ROW_COLOR'.
+    RETURN.
+  ENDLOOP.
+
+  " Thêm ROW_COLOR: LVC_T_SCOL
+  lo_any ?= cl_abap_typedescr=>describe_by_name( 'LVC_T_SCOL' ).
+  CLEAR ls_comp.
+  ls_comp-name = 'ROW_COLOR'.
+  ls_comp-type ?= lo_any.
+  APPEND ls_comp TO lt_comp.
+
+  " Dựng lại line type
+  lo_newline = cl_abap_structdescr=>create( lt_comp ).
+
+  " Dựng lại table type (giữ đơn giản để tương thích release cũ)
+  lo_newtab  = cl_abap_tabledescr=>create( p_line_type = lo_newline ).
+
+  " Cấp phát & move dữ liệu cũ
+  ASSIGN cr_tab->* TO <lt_old>.
+  CREATE DATA lr_new TYPE HANDLE lo_newtab.
+  ASSIGN lr_new->* TO <lt_new>.
+
+  LOOP AT <lt_old> ASSIGNING <ls_old>.
+    CREATE DATA lr_row TYPE HANDLE lo_newline.
+    ASSIGN lr_row->* TO <ls_new>.
+    MOVE-CORRESPONDING <ls_old> TO <ls_new>.
+    APPEND <ls_new> TO <lt_new>.
+  ENDLOOP.
+
+  cr_tab = lr_new.
 ENDFORM.
 
 FORM ensure_celltab_component CHANGING cr_tab TYPE REF TO data.
@@ -4025,25 +4272,24 @@ ENDFORM.
 
 
 FORM on_save.
-  DATA: lv_mod     TYPE i,
-        lv_err     TYPE string,
-        lv_ck      TYPE string,
-        lv_msg     TYPE c LENGTH 200.
+  DATA: lv_mod TYPE i,
+        lv_err TYPE string,
+        lv_msg TYPE c LENGTH 200.
 
-  DATA: lr_to_save   TYPE REF TO data,
-        lo_line      TYPE REF TO cl_abap_structdescr,
-        lo_tab       TYPE REF TO cl_abap_tabledescr.
+  DATA: lr_to_save TYPE REF TO data,
+        lo_line    TYPE REF TO cl_abap_structdescr,
+        lo_tab     TYPE REF TO cl_abap_tabledescr.
 
   FIELD-SYMBOLS: <lt_to_save> TYPE STANDARD TABLE,
                  <ls_to_save> TYPE any.
 
-  FIELD-SYMBOLS: <lt_data>    TYPE STANDARD TABLE,
-                 <ls_data>    TYPE any,
-                 <newrec>     TYPE any.
+  FIELD-SYMBOLS: <lt_data> TYPE STANDARD TABLE,
+                 <ls_data> TYPE any,
+                 <newrec>  TYPE any.
 
-  DATA: lv_where        TYPE string,
-        lv_we           TYPE string,
-        lv_is_new       TYPE abap_bool.
+  DATA: lv_where  TYPE string,
+        lv_we     TYPE string,
+        lv_is_new TYPE abap_bool.
 
   DATA: lr_db_struct TYPE REF TO cl_abap_structdescr,
         lr_now_db    TYPE REF TO data,
@@ -4061,15 +4307,28 @@ FORM on_save.
   DATA: ls_stbl TYPE lvc_s_stbl.
   CLEAR ls_stbl. ls_stbl-row = 'X'. ls_stbl-col = 'X'.
 
-  " 1) Kiểm tra khóa khi thêm dòng (hiển thị rõ field lỗi)
+  " Đẩy dữ liệu đang edit về itab
+  IF g_alv_grid IS BOUND.
+    TRY. g_alv_grid->check_changed_data( ). CATCH cx_root. ENDTRY.
+  ENDIF.
+
+  " 1) Kiểm tra khóa khi thêm dòng (đủ khóa, highlight cụ thể)
+  DATA lv_ck TYPE string.
   CLEAR lv_ck.
   PERFORM check_key_on_add USING p_tab CHANGING lv_ck.
   IF lv_ck IS NOT INITIAL.
     MESSAGE lv_ck TYPE 'S' DISPLAY LIKE 'E'.
+    gv_dirty        = abap_true.
+  gv_add_mode     = abap_true.   " vẫn đang add
+  gv_edit_md      = abap_true.
+  gv_toolbar_mode = 'E'.
+  IF g_alv_grid IS BOUND.
+    TRY. g_alv_grid->set_ready_for_input( 1 ). CATCH cx_root. ENDTRY.
+  ENDIF.
     RETURN.
   ENDIF.
 
-  " 2) Build audit và chuẩn bị danh sách lưu
+  " 2) Chuẩn bị
   REFRESH gt_audit.
   ASSIGN gr_data->* TO <lt_data>.
   IF <lt_data> IS NOT ASSIGNED OR <lt_data> IS INITIAL.
@@ -4088,6 +4347,45 @@ FORM on_save.
   CREATE DATA lr_old_db TYPE HANDLE lr_db_struct.
   ASSIGN lr_now_db->* TO <ls_db_now>.
   ASSIGN lr_old_db->* TO <ls_db_old>.
+
+  " === 2.a) Chặn TRÙNG KHÓA giữa các NEWREC ngay trong ALV ===
+  TYPES: BEGIN OF ty_fp, fp TYPE string, END OF ty_fp.
+  DATA: lt_seen_fp TYPE HASHED TABLE OF ty_fp WITH UNIQUE KEY fp,
+        ls_fp      TYPE ty_fp,
+        lv_fp      TYPE string,
+        lv_any_err TYPE abap_bool VALUE abap_false.
+
+  " helper build_key_fingerprint đã có sẵn ở include AUDIT
+  LOOP AT <lt_data> ASSIGNING <ls_data>.
+    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_data> TO <newrec>.
+    IF sy-subrc = 0 AND <newrec> = 'X'.
+      PERFORM build_key_fingerprint USING <ls_data> gt_key_fields CHANGING lv_fp.
+      IF lv_fp IS NOT INITIAL.
+        IF line_exists( lt_seen_fp[ fp = lv_fp ] ).
+          lv_any_err = abap_true.
+          " đánh dấu lỗi nhẹ để user biết (nếu bạn có IS_ERROR/IS_MESSAGE thì set, còn không bỏ qua)
+          " PERFORM mark_row_error USING <ls_data> 'Trùng khóa giữa các dòng mới.'.
+        ELSE.
+          ls_fp-fp = lv_fp.
+          INSERT ls_fp INTO TABLE lt_seen_fp.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+
+  IF lv_any_err = abap_true.
+    MESSAGE 'Có dòng NEWREC trùng khóa trong lưới. Vui lòng sửa rồi lưu lại.' TYPE 'S' DISPLAY LIKE 'E'.
+    gv_dirty = abap_true.
+    PERFORM apply_editability_and_push.
+    IF g_alv_grid IS BOUND.
+      g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+  " 3) Gom danh sách cần lưu (chỉ những dòng hợp lệ) + dựng audit CHO NHỮNG DÒNG SẼ LƯU
+  "    Đồng thời giữ fingerprint của các INSERT hợp lệ để lát nữa clear NEWREC đúng dòng
+  DATA: lt_ins_fp_ok TYPE HASHED TABLE OF ty_fp WITH UNIQUE KEY fp.
 
   LOOP AT <lt_data> ASSIGNING <ls_data>.
     " NEWREC?
@@ -4123,16 +4421,22 @@ FORM on_save.
         SELECT SINGLE * FROM (p_tab)
           WHERE (lv_where)
           INTO CORRESPONDING FIELDS OF @<ls_old>.
-
       CATCH cx_sy_dynamic_osql_syntax INTO lxsql.
         MESSAGE lxsql->get_text( ) TYPE 'S' DISPLAY LIKE 'E'.
         CLEAR <ls_old>.
         sy-subrc = 4.
     ENDTRY.
 
-    " INSERT mới
-    IF lv_is_new = abap_true AND sy-subrc <> 0.
-      " --- CHỈ set Created*, KHÔNG set Changed* ---
+    IF lv_is_new = abap_true.
+      " === INSERT: chỉ cho qua nếu CHƯA có trên DB ===
+      IF sy-subrc = 0.
+        " Đã tồn tại trong DB -> bỏ qua, đánh dấu lỗi nhẹ
+        lv_any_err = abap_true.
+        " PERFORM mark_row_error USING <ls_data> 'Khóa đã tồn tại trong DB.'.
+        CONTINUE.
+      ENDIF.
+
+      " Set Created* trước khi lưu
       FIELD-SYMBOLS: <erdat> TYPE any, <ertim> TYPE any, <ernam> TYPE any.
       ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO <erdat>.
       ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO <ertim>.
@@ -4141,6 +4445,7 @@ FORM on_save.
       IF <ertim> IS ASSIGNED. <ertim> = sy-uzeit. ENDIF.
       IF <ernam> IS ASSIGNED. <ernam> = sy-uname. ENDIF.
 
+      " Chuẩn bị audit CREATE (chỉ cho dòng sẽ lưu)
       DATA(ls_a_i) = VALUE ty_audit(
         tabname = p_tab
         action  = 'INSERT'
@@ -4151,12 +4456,21 @@ FORM on_save.
       CALL FUNCTION 'GUID_CREATE' IMPORTING ev_guid_32 = ls_a_i-logid.
       APPEND ls_a_i TO gt_audit.
 
+      " Cho vào danh sách save
       APPEND INITIAL LINE TO <lt_to_save> ASSIGNING <ls_to_save>.
       MOVE-CORRESPONDING <ls_data> TO <ls_to_save>.
       PERFORM log_audit_action USING p_tab 'C' <ls_data>.
 
+      " Ghi fingerprint để lát nữa clear NEWREC đúng dòng
+      CLEAR lv_fp.
+      PERFORM build_key_fingerprint USING <ls_data> gt_key_fields CHANGING lv_fp.
+      IF lv_fp IS NOT INITIAL.
+        ls_fp-fp = lv_fp.
+        INSERT ls_fp INTO TABLE lt_ins_fp_ok.
+      ENDIF.
+
     ELSE.
-      " --- UPDATE (chỉ set Changed* nếu khác DB và không phải dòng mới) ---
+      " === UPDATE: chỉ khi khác DB mới lưu + audit
       CLEAR: <ls_db_now>, <ls_db_old>.
       MOVE-CORRESPONDING <ls_data> TO <ls_db_now>.
       MOVE-CORRESPONDING <ls_old>  TO <ls_db_old>.
@@ -4190,30 +4504,41 @@ FORM on_save.
         PERFORM log_audit_action USING p_tab 'U' <ls_data>.
       ENDIF.
     ENDIF.
-
-    " Xóa cờ NEWREC sau khi xử lý
-    IF lv_is_new = abap_true.
-      CLEAR <newrec>.
-    ENDIF.
   ENDLOOP.
 
-  " 3) Lưu DB
+  " 4) Không có gì để lưu?
   IF <lt_to_save> IS NOT ASSIGNED OR <lt_to_save> IS INITIAL.
-    MESSAGE 'Không có dữ liệu hợp lệ để lưu.' TYPE 'S' DISPLAY LIKE 'E'.
+    IF lv_any_err = abap_true.
+      MESSAGE 'Có dòng lỗi (trùng khóa). Không có dữ liệu hợp lệ để lưu.' TYPE 'S' DISPLAY LIKE 'E'.
+    ELSE.
+      MESSAGE 'Không có gì thay đổi để lưu.' TYPE 'S'.
+    ENDIF.
     RETURN.
   ENDIF.
 
+  " 5) Lưu DB
   PERFORM save_data USING p_tab
                     CHANGING lr_to_save
                              lv_mod
                              lv_err.
+
   IF lv_err IS NOT INITIAL.
     ROLLBACK WORK.
+    " Ở lại Edit để user sửa lỗi
+    gv_dirty        = abap_true.
+    gv_add_mode     = abap_false.
+    gv_edit_md      = abap_true.
+    gv_toolbar_mode = 'E'.
+    IF g_alv_grid IS BOUND.
+      TRY. g_alv_grid->set_ready_for_input( 1 ). CATCH cx_root. ENDTRY.
+      g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
+      TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
+    ENDIF.
     MESSAGE lv_err TYPE 'S' DISPLAY LIKE 'E'.
     RETURN.
   ENDIF.
 
-  " 4) Ghi audit log
+  " 6) Ghi audit log (chỉ ghi khi save_data OK)
   TYPES: BEGIN OF ty_audit_db,
            mandt       TYPE mandt,
            logid       TYPE char32,
@@ -4225,7 +4550,6 @@ FORM on_save.
            before_json TYPE zde_json_txt,
            after_json  TYPE zde_json_txt,
          END OF ty_audit_db.
-
   DATA wa_log TYPE ty_audit_db.
   LOOP AT gt_audit ASSIGNING FIELD-SYMBOL(<a>).
     CLEAR wa_log.
@@ -4234,14 +4558,30 @@ FORM on_save.
     INSERT zaudit_log FROM wa_log.
   ENDLOOP.
 
-  " 5) Commit + Refresh ALV + Quay về View Mode
+  " 7) Commit + dọn cờ NEWREC CHỈ CHO NHỮNG DÒNG INSERT THÀNH CÔNG
   COMMIT WORK AND WAIT.
 
+  ASSIGN gr_data->* TO <lt_data>.
+  IF <lt_data> IS ASSIGNED AND lt_ins_fp_ok IS NOT INITIAL.
+    LOOP AT <lt_data> ASSIGNING <ls_data>.
+      ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_data> TO <newrec>.
+      IF sy-subrc = 0 AND <newrec> = 'X'.
+        CLEAR lv_fp.
+        PERFORM build_key_fingerprint USING <ls_data> gt_key_fields CHANGING lv_fp.
+        IF lv_fp IS NOT INITIAL AND line_exists( lt_ins_fp_ok[ fp = lv_fp ] ).
+          CLEAR <newrec>.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
+CLEAR gt_changed_existing_keys.
+  " 8) Về View mode
   gv_dirty        = abap_false.
   gv_add_mode     = abap_false.
   gv_edit_md      = abap_false.
   gv_toolbar_mode = 'D'.
 
+  PERFORM apply_editability_and_push.
   IF g_alv_grid IS BOUND.
     TRY. g_alv_grid->set_ready_for_input( 0 ). CATCH cx_root. ENDTRY.
     g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
@@ -4253,19 +4593,16 @@ FORM on_save.
   DATA(lv_upd) = REDUCE i( INIT y = 0 FOR a IN gt_audit WHERE ( action = 'UPDATE' ) NEXT y = y + 1 ).
   DATA(lv_cnt) = lines( <lt_to_save> ).
   MESSAGE |Đã lưu { lv_cnt } dòng (INSERT={ lv_ins }, UPDATE={ lv_upd }) và quay về chế độ xem.| TYPE 'S'.
-
 ENDFORM.
 
 
-
-
-FORM delete_selected USING iv_tab TYPE tabname
+FORM delete_selected USING    iv_tab TYPE tabname
                      CHANGING ev_msg TYPE c
                               ev_err TYPE c.
 
   CLEAR: ev_msg, ev_err.
 
-  " Giữ lại trạng thái Edit/Add trước khi xóa để khôi phục cuối form (cú pháp cổ điển)
+  " Ghi nhớ trạng thái để restore
   DATA lv_keep_edit TYPE abap_bool.
   IF gv_edit_md = abap_true OR gv_add_mode = abap_true.
     lv_keep_edit = abap_true.
@@ -4273,17 +4610,19 @@ FORM delete_selected USING iv_tab TYPE tabname
     lv_keep_edit = abap_false.
   ENDIF.
 
-  FIELD-SYMBOLS: <lt> TYPE STANDARD TABLE, <ls> TYPE any.
-  ASSIGN gr_data->* TO <lt>.
-  IF <lt> IS INITIAL.
+  FIELD-SYMBOLS: <tab> TYPE STANDARD TABLE, <wa> TYPE any.
+  ASSIGN gr_data->* TO <tab>.
+  IF <tab> IS NOT ASSIGNED OR <tab> IS INITIAL.
     ev_err = 'Không có dữ liệu để xóa.'.
     RETURN.
   ENDIF.
 
-  " Lấy danh sách chọn
+  " Lấy selection hoặc dòng hiện tại
   DATA: lt_sel_idx TYPE lvc_t_row,
-        ls_sel_idx TYPE lvc_s_row.
-  REFRESH lt_sel_idx.
+        ls_sel_idx TYPE lvc_s_row,
+        ls_rowid   TYPE lvc_s_row,
+        ls_colid   TYPE lvc_s_col.
+  CLEAR lt_sel_idx.
 
   IF g_alv_grid IS BOUND.
     TRY.
@@ -4292,76 +4631,61 @@ FORM delete_selected USING iv_tab TYPE tabname
     ENDTRY.
   ENDIF.
 
-  " Nếu chưa chọn thì lấy dòng hiện tại
-  IF lt_sel_idx IS INITIAL.
-    DATA ls_rowid TYPE lvc_s_row.
-    DATA ls_colid TYPE lvc_s_col.
-    IF g_alv_grid IS BOUND.
-      TRY.
-          g_alv_grid->get_current_cell( IMPORTING es_row_id = ls_rowid es_col_id = ls_colid ).
-        CATCH cx_root.
-      ENDTRY.
-    ENDIF.
+  IF lt_sel_idx IS INITIAL AND g_alv_grid IS BOUND.
+    TRY.
+        g_alv_grid->get_current_cell( IMPORTING es_row_id = ls_rowid es_col_id = ls_colid ).
+      CATCH cx_root.
+    ENDTRY.
     IF ls_rowid-index IS INITIAL.
       ev_err = 'Vui lòng chọn hoặc đặt con trỏ vào dòng cần xóa.'.
       RETURN.
     ENDIF.
-    CLEAR ls_sel_idx.
     ls_sel_idx-index = ls_rowid-index.
     APPEND ls_sel_idx TO lt_sel_idx.
   ENDIF.
 
-  " Đảo ngược index để delete không lệch
-  DATA: lt_idx TYPE STANDARD TABLE OF i WITH DEFAULT KEY,
-        lv_i   TYPE i.
-  REFRESH lt_idx.
-  LOOP AT lt_sel_idx INTO ls_sel_idx.
-    lv_i = ls_sel_idx-index.
-    APPEND lv_i TO lt_idx.
-  ENDLOOP.
-  SORT lt_idx DESCENDING.
+  " Đảo giảm dần để xóa không lệch
+  SORT lt_sel_idx BY index DESCENDING.
 
-  " Đảm bảo danh sách khóa
+  " Đảm bảo có key trong DDIC đối với xóa DB
   PERFORM ensure_keys USING iv_tab.
   IF gt_key_fields IS INITIAL.
     ev_err = 'Bảng không có khóa trong DDIC — không thể xóa.'.
     RETURN.
   ENDIF.
 
-  " Chuẩn bị audit buffer
+  " Buffer audit
   REFRESH gt_audit.
 
-  " Biến làm việc
-  DATA: lv_where          TYPE string,
-        lv_we             TYPE string,
-        lv_exists         TYPE abap_bool,
-        lv_deleted        TYPE i,
-        lv_newrec_deleted TYPE i.
-  CLEAR: lv_deleted, lv_newrec_deleted.
+  " Biến thống kê
+  DATA: lv_deleted        TYPE i VALUE 0,  " xóa DB
+        lv_newrec_deleted TYPE i VALUE 0.  " xóa chỉ trên lưới
 
-  LOOP AT lt_idx INTO lv_i.
-    READ TABLE <lt> ASSIGNING <ls> INDEX lv_i.
-    IF sy-subrc <> 0 OR <ls> IS NOT ASSIGNED.
+  " Xử lý theo từng index
+  FIELD-SYMBOLS: <newrec> TYPE any,
+                 <comp>   TYPE any.
+  DATA: lv_where TYPE string,
+        lv_we    TYPE string,
+        lv_exists TYPE abap_bool.
+
+  LOOP AT lt_sel_idx INTO ls_sel_idx.
+    READ TABLE <tab> ASSIGNING <wa> INDEX ls_sel_idx-index.
+    IF sy-subrc <> 0 OR <wa> IS NOT ASSIGNED.
       CONTINUE.
     ENDIF.
 
-    " 1) Dòng NEWREC -> chỉ xóa khỏi ALV
-    FIELD-SYMBOLS <newrec> TYPE any.
-    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <newrec>.
-    IF sy-subrc = 0 AND <newrec> IS ASSIGNED AND <newrec> = 'X'.
-      DELETE <lt> INDEX lv_i.
+    " 1) NEWREC => xóa khỏi lưới
+    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <wa> TO <newrec>.
+    IF sy-subrc = 0 AND <newrec> = 'X'.
+      DELETE <tab> INDEX ls_sel_idx-index.
       lv_newrec_deleted = lv_newrec_deleted + 1.
       CONTINUE.
     ENDIF.
 
-    " 2) Dòng DB cũ -> kiểm tra đủ khóa
-    DATA any_empty TYPE abap_bool.
-    any_empty = abap_false.
-
-    FIELD-SYMBOLS: <comp>  TYPE any,
-                   <fname> TYPE dd03l-fieldname.
-    LOOP AT gt_key_fields ASSIGNING <fname>.
-      ASSIGN COMPONENT <fname> OF STRUCTURE <ls> TO <comp>.
+    " 2) Dòng cũ => kiểm tra key đủ chưa
+    DATA any_empty TYPE abap_bool VALUE abap_false.
+    LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<kfld>).
+      ASSIGN COMPONENT <kfld> OF STRUCTURE <wa> TO <comp>.
       IF sy-subrc = 0 AND <comp> IS INITIAL.
         any_empty = abap_true.
         EXIT.
@@ -4369,185 +4693,156 @@ FORM delete_selected USING iv_tab TYPE tabname
     ENDLOOP.
 
     IF any_empty = abap_true.
-      " Khóa không đủ → chỉ xóa khỏi lưới cho sạch
-      DELETE <lt> INDEX lv_i.
-      ev_msg = 'Dòng có khóa không đầy đủ đã được xóa khỏi lưới.'.
+      " không đủ khóa -> xóa khỏi lưới (không xóa DB)
+      DELETE <tab> INDEX ls_sel_idx-index.
       CONTINUE.
     ENDIF.
 
-    " Build điều kiện WHERE từ khóa
+    " Build WHERE từ khóa
     CLEAR: lv_where, lv_we.
-    PERFORM make_where_from_key USING <ls> gt_key_fields CHANGING lv_where lv_we.
+    PERFORM make_where_from_key USING <wa> gt_key_fields CHANGING lv_where lv_we.
     IF lv_we IS NOT INITIAL OR lv_where IS INITIAL.
       ev_err = 'Không xây được điều kiện khóa để xóa.'.
       EXIT.
     ENDIF.
 
-    " Có còn tồn tại trong DB không?
+    " Tồn tại DB?
     CLEAR lv_exists.
     TRY.
         SELECT SINGLE @abap_true FROM (iv_tab) WHERE (lv_where) INTO @lv_exists.
-        CATCH cx_sy_dynamic_osql_syntax INTO DATA(lx_del1).
-          ev_err = lx_del1->get_text( ).
-          EXIT.
-      ENDTRY.
+      CATCH cx_sy_dynamic_osql_syntax INTO DATA(lx_syntax1).
+        ev_err = lx_syntax1->get_text( ).
+        EXIT.
+    ENDTRY.
 
-      IF sy-subrc <> 0.
-        " Không còn trong DB -> xóa khỏi ALV cho sạch
-        DELETE <lt> INDEX lv_i.
-        CONTINUE.
-      ENDIF.
+    IF ev_err IS NOT INITIAL. EXIT. ENDIF.
 
-      " Lưu bản cũ để audit
+    IF lv_exists = abap_true.
+      " Lấy bản cũ để audit (CORRESPONDING để tránh thiếu field kỹ thuật)
       DATA lr_old TYPE REF TO data.
-      CREATE DATA lr_old LIKE <ls>.
-      FIELD-SYMBOLS <ls_old> TYPE any.
-      ASSIGN lr_old->* TO <ls_old>.
-      CLEAR <ls_old>.
+      CREATE DATA lr_old LIKE <wa>.
+      FIELD-SYMBOLS <wa_old> TYPE any.
+      ASSIGN lr_old->* TO <wa_old>.
+      CLEAR <wa_old>.
 
       TRY.
           SELECT SINGLE * FROM (iv_tab) WHERE (lv_where)
-            INTO CORRESPONDING FIELDS OF @<ls_old>.
-          CATCH cx_sy_dynamic_osql_syntax INTO DATA(lx_del2).
-            ev_err = lx_del2->get_text( ).
-            EXIT.
-        ENDTRY.
-        IF ev_err IS NOT INITIAL.
+            INTO CORRESPONDING FIELDS OF @<wa_old>.
+        CATCH cx_sy_dynamic_osql_syntax INTO DATA(lx_syntax2).
+          ev_err = lx_syntax2->get_text( ).
           EXIT.
-        ENDIF.
-        IF sy-subrc <> 0.
-          <ls_old> = <ls>.
-        ENDIF.
+      ENDTRY.
+      IF ev_err IS NOT INITIAL. EXIT. ENDIF.
+      IF sy-subrc <> 0. <wa_old> = <wa>. ENDIF.
 
-        " Xóa DB
-        TRY.
-            DELETE FROM (iv_tab) WHERE (lv_where).
-          CATCH cx_sy_dynamic_osql_syntax INTO DATA(lx_del3).
-            ev_err = lx_del3->get_text( ).
-            EXIT.
-        ENDTRY.
-        IF sy-subrc <> 0.
-          ev_err = 'Xóa DB thất bại cho 1 dòng; dừng lại.'.
+      " Xóa DB
+      TRY.
+          DELETE FROM (iv_tab) WHERE (lv_where).
+        CATCH cx_sy_dynamic_osql_syntax INTO DATA(lx_syntax3).
+          ev_err = lx_syntax3->get_text( ).
           EXIT.
-        ENDIF.
-
-        " Xóa khỏi ALV & ghi audit
-        DELETE <lt> INDEX lv_i.
-
-        DATA ls_a TYPE ty_audit.
-        CLEAR ls_a.
-        ls_a-tabname = iv_tab.
-        ls_a-action  = 'DELETE'.
-        ls_a-uname   = sy-uname.
-        ls_a-udate   = sy-datum.
-        ls_a-utime   = sy-uzeit.
-        PERFORM to_json USING <ls_old> CHANGING ls_a-before_json.
-        CALL FUNCTION 'GUID_CREATE' IMPORTING ev_guid_32 = ls_a-logid.
-        APPEND ls_a TO gt_audit.
-
-        lv_deleted = lv_deleted + 1.
-      ENDLOOP.
-
-      " === Sau xóa: quét lại xem còn dòng NEWREC='X' nào không ===
-      DATA(lv_still_has_newrec) = abap_false.
-      LOOP AT <lt> ASSIGNING <ls>.
-        ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <newrec>.
-        IF sy-subrc = 0 AND <newrec> = 'X'.
-          lv_still_has_newrec = abap_true.
-          EXIT.
-        ENDIF.
-      ENDLOOP.
-
-      IF ev_err IS NOT INITIAL.
-        ROLLBACK WORK.
-        RETURN.
+      ENDTRY.
+      IF sy-subrc <> 0.
+        ev_err = 'Xóa DB thất bại cho 1 dòng; dừng lại.'.
+        EXIT.
       ENDIF.
 
-      " Ghi audit vào bảng log
-      IF gt_audit IS NOT INITIAL.
-        TYPES: BEGIN OF ty_audit_db,
-                 mandt       TYPE mandt,
-                 logid       TYPE char32,
-                 uname       TYPE syuname,
-                 udate       TYPE sydatum,
-                 utime       TYPE syuzeit,
-                 tabname     TYPE tabname,
-                 action      TYPE char10,
-                 before_json TYPE zde_json_txt,
-                 after_json  TYPE zde_json_txt,
-               END OF ty_audit_db.
-        DATA wa_log      TYPE ty_audit_db.
-        DATA lv_audit_tab TYPE tabname.
-        lv_audit_tab = 'ZAUDIT_LOG'.
+      " Xóa trên lưới + audit
+      DELETE <tab> INDEX ls_sel_idx-index.
 
-        FIELD-SYMBOLS <a> TYPE ty_audit.
-        LOOP AT gt_audit ASSIGNING <a>.
-          CLEAR wa_log.
-          wa_log-mandt       = sy-mandt.
-          wa_log-logid       = <a>-logid.
-          wa_log-uname       = <a>-uname.
-          wa_log-udate       = <a>-udate.
-          wa_log-utime       = <a>-utime.
-          wa_log-tabname     = <a>-tabname.
-          wa_log-action      = <a>-action.
-          wa_log-before_json = <a>-before_json.
-          INSERT (lv_audit_tab) FROM wa_log.
-        ENDLOOP.
-      ENDIF.
+      DATA ls_a TYPE ty_audit.
+      CLEAR ls_a.
+      ls_a-tabname = iv_tab.
+      ls_a-action  = 'DELETE'.
+      ls_a-uname   = sy-uname.
+      ls_a-udate   = sy-datum.
+      ls_a-utime   = sy-uzeit.
+      PERFORM to_json USING <wa_old> CHANGING ls_a-before_json.
+      CALL FUNCTION 'GUID_CREATE' IMPORTING ev_guid_32 = ls_a-logid.
+      APPEND ls_a TO gt_audit.
 
-      " Chỉ COMMIT khi có xóa DB hoặc có ghi audit
-      IF lv_deleted > 0 OR gt_audit IS NOT INITIAL.
-        COMMIT WORK AND WAIT.
-      ENDIF.
+      lv_deleted = lv_deleted + 1.
 
-      " Nếu chỉ xóa NEWREC nhưng trước đó có sửa dòng cũ → reload để về trạng thái sạch
-      DATA lv_had_dirty TYPE abap_bool.
-      lv_had_dirty = gv_dirty.
-      IF lv_deleted = 0 AND lv_newrec_deleted > 0 AND lv_had_dirty = abap_true.
-        DATA lv_rows2 TYPE i.
-        DATA lv_err2  TYPE string.
-        PERFORM load_data USING iv_tab 0 CHANGING gr_data lv_rows2 lv_err2.
-        IF lv_err2 IS INITIAL.
-          gv_dirty = abap_false.
-        ELSE.
-          ev_err = |Reload dữ liệu sau khi xóa NEWREC thất bại: | && lv_err2.
-        ENDIF.
-      ENDIF.
+    ELSE.
+      " Không còn DB -> xóa khỏi lưới
+      DELETE <tab> INDEX ls_sel_idx-index.
+    ENDIF.
+  ENDLOOP.
 
-      " Message tổng kết
-      ev_msg = |Đã xóa | && lv_deleted && | dòng DB và | &&
-               lv_newrec_deleted && | dòng NEWREC.|.
+  IF ev_err IS NOT INITIAL.
+    ROLLBACK WORK.
+    RETURN.
+  ENDIF.
 
-      " Khôi phục mode
-      gv_dirty    = abap_false.
-      gv_add_mode = COND #( WHEN lv_still_has_newrec = abap_true THEN abap_true ELSE abap_false ).
-      IF lv_keep_edit = abap_true.
-        gv_edit_md      = abap_true.
-        gv_toolbar_mode = 'E'.
-      ELSE.
-        gv_edit_md      = abap_false.
-        gv_toolbar_mode = 'D'.
-      ENDIF.
+  " Ghi audit vào bảng log (nếu có)
+  IF gt_audit IS NOT INITIAL.
+    TYPES: BEGIN OF ty_audit_db,
+             mandt       TYPE mandt,
+             logid       TYPE char32,
+             uname       TYPE syuname,
+             udate       TYPE sydatum,
+             utime       TYPE syuzeit,
+             tabname     TYPE tabname,
+             action      TYPE char10,
+             before_json TYPE zde_json_txt,
+             after_json  TYPE zde_json_txt,
+           END OF ty_audit_db.
+    DATA wa_log TYPE ty_audit_db.
+    DATA lv_audit_tab TYPE tabname VALUE 'ZAUDIT_LOG'.
 
-      PERFORM apply_editability_and_push.
+    FIELD-SYMBOLS <a> TYPE ty_audit.
+    LOOP AT gt_audit ASSIGNING <a>.
+      CLEAR wa_log.
+      wa_log-mandt       = sy-mandt.
+      wa_log-logid       = <a>-logid.
+      wa_log-uname       = <a>-uname.
+      wa_log-udate       = <a>-udate.
+      wa_log-utime       = <a>-utime.
+      wa_log-tabname     = <a>-tabname.
+      wa_log-action      = <a>-action.
+      wa_log-before_json = <a>-before_json.
+      INSERT (lv_audit_tab) FROM wa_log.
+    ENDLOOP.
+  ENDIF.
 
-      " Nếu còn NEWREC thì focus vào key của dòng NEWREC cuối cùng
-      IF lv_still_has_newrec = abap_true.
-        PERFORM focus_key_on_newrec.
-      ENDIF.
+  " Commit nếu có xóa DB / ghi audit
+  IF lv_deleted > 0 OR gt_audit IS NOT INITIAL.
+    COMMIT WORK AND WAIT.
+  ENDIF.
 
-      IF g_alv_grid IS BOUND.
-        IF gv_edit_md = abap_true.
-          g_alv_grid->set_ready_for_input( 1 ).
-        ELSE.
-          g_alv_grid->set_ready_for_input( 0 ).
-        ENDIF.
-        g_alv_grid->refresh_table_display(
-          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-        TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
-      ENDIF.
+  " Cập nhật trạng thái chung
+  DATA lv_still_has_newrec TYPE abap_bool VALUE abap_false.
+  LOOP AT <tab> ASSIGNING <wa>.
+    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <wa> TO <newrec>.
+    IF sy-subrc = 0 AND <newrec> = 'X'.
+      lv_still_has_newrec = abap_true.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
 
+  ev_msg = |Đã xóa | && lv_deleted && | dòng DB và | &&
+           lv_newrec_deleted && | dòng NEWREC.|.
+
+  gv_dirty    = abap_false.
+  gv_add_mode = COND #( WHEN lv_still_has_newrec = abap_true THEN abap_true ELSE abap_false ).
+  IF lv_keep_edit = abap_true.
+    gv_edit_md      = abap_true.
+    gv_toolbar_mode = 'E'.
+  ELSE.
+    gv_edit_md      = abap_false.
+    gv_toolbar_mode = 'D'.
+  ENDIF.
+
+  " Áp lại style (xám khóa, audit…), rồi caller sẽ refresh
+  PERFORM apply_editability_and_push.
+
+  " Nếu còn NEWREC thì focus vào key
+  IF lv_still_has_newrec = abap_true.
+    PERFORM focus_key_on_newrec.
+  ENDIF.
 ENDFORM.
+
+
 
 
 *-------------------------------------------------------------*
@@ -5542,77 +5837,64 @@ FORM is_newrec_target_for_delete CHANGING ev_newrec_only TYPE abap_bool.
   ENDIF.
 ENDFORM.
 
+*---------------------------------------------------------------------*
+* Discard all unsaved changes: KHÔI PHỤC HOÀN TOÀN TỪ BẢN GỐC (SAFE)  *
+* - Phù hợp cả khi line type <lt_cur> và <lt_orig> KHÔNG đồng nhất    *
+* - Không dump: dùng MOVE-CORRESPONDING theo từng dòng                *
+*---------------------------------------------------------------------*
 FORM discard_unsaved_changes.
+
   FIELD-SYMBOLS: <lt_cur>  TYPE STANDARD TABLE,
                  <ls_cur>  TYPE any,
                  <lt_orig> TYPE STANDARD TABLE,
-                 <ls_orig> TYPE any,
-                 <flag>    TYPE any,
-                 <kname>   TYPE dd03l-fieldname,
-                 <v1>      TYPE any,
-                 <v2>      TYPE any.
+                 <ls_orig> TYPE any.
 
   " 0) Lấy itab hiện tại và bản gốc
   ASSIGN gr_data->*          TO <lt_cur>.
   ASSIGN gr_data_original->* TO <lt_orig>.
+
   IF <lt_cur> IS NOT ASSIGNED.
     RETURN.
   ENDIF.
 
-  " 1) Xóa toàn bộ dòng NEWREC (chưa lưu)
-  DATA lt_del_idx TYPE STANDARD TABLE OF i WITH EMPTY KEY.
-  LOOP AT <lt_cur> ASSIGNING <ls_cur>.
-    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_cur> TO <flag>.
-    IF sy-subrc = 0 AND <flag> = 'X'.
-      APPEND sy-tabix TO lt_del_idx.
-    ENDIF.
-  ENDLOOP.
-  IF lt_del_idx IS NOT INITIAL.
-    SORT lt_del_idx DESCENDING.
-    LOOP AT lt_del_idx ASSIGNING FIELD-SYMBOL(<idx>).
-      DELETE <lt_cur> INDEX <idx>.
-    ENDLOOP.
-  ENDIF.
-
-  " 2) Khôi phục các dòng cũ đã sửa từ bản gốc theo KEY (không reload DB)
-  IF <lt_orig> IS ASSIGNED AND <lt_orig> IS NOT INITIAL AND gt_key_fields IS NOT INITIAL.
-    LOOP AT <lt_cur> ASSIGNING <ls_cur>.
-      " tìm dòng tương ứng trong bản gốc theo khóa
-      DATA(lv_found) = abap_false.
-      LOOP AT <lt_orig> ASSIGNING <ls_orig>.
-        DATA(lv_match) = abap_true.
-        LOOP AT gt_key_fields ASSIGNING <kname>.
-          ASSIGN COMPONENT <kname> OF STRUCTURE <ls_cur>  TO <v1>.
-          ASSIGN COMPONENT <kname> OF STRUCTURE <ls_orig> TO <v2>.
-          IF <v1> <> <v2>.
-            lv_match = abap_false.
-            EXIT.
-          ENDIF.
-        ENDLOOP.
-        IF lv_match = abap_true.
-          " copy lại các cột trùng tên (an toàn với cấu trúc động)
-          MOVE-CORRESPONDING <ls_orig> TO <ls_cur>.
-          lv_found = abap_true.
-          EXIT.
-        ENDIF.
-      ENDLOOP.
+  " 1+2) HARD RESET an toàn: clear và rebuild <lt_cur> từ <lt_orig> bằng MOVE-CORRESPONDING
+  CLEAR <lt_cur>.
+  IF <lt_orig> IS ASSIGNED AND <lt_orig> IS NOT INITIAL.
+    LOOP AT <lt_orig> ASSIGNING <ls_orig>.
+      APPEND INITIAL LINE TO <lt_cur> ASSIGNING <ls_cur>.
+      " Chép các cột trùng tên (tránh dump khi cấu trúc khác nhau)
+      MOVE-CORRESPONDING <ls_orig> TO <ls_cur>.
     ENDLOOP.
   ENDIF.
 
   " 3) Reset trạng thái & refresh UI
+  CLEAR gt_changed_existing_keys.
+
   gv_dirty        = abap_false.
   gv_add_mode     = abap_false.
   gv_edit_md      = abap_false.
   gv_toolbar_mode = 'D'.
 
   PERFORM apply_editability_and_push.
+
   IF g_alv_grid IS BOUND.
-    TRY. g_alv_grid->set_ready_for_input( 0 ). CATCH cx_root. ENDTRY.
+    TRY.
+        g_alv_grid->set_ready_for_input( 0 ).
+      CATCH cx_root.
+    ENDTRY.
+
     g_alv_grid->refresh_table_display(
       EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-    TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
+
+    TRY.
+        g_alv_grid->set_toolbar_interactive( ).
+      CATCH cx_root.
+    ENDTRY.
   ENDIF.
+
 ENDFORM.
+
+
 
 
 FORM purge_incomplete_newrecs.
@@ -5622,19 +5904,27 @@ FORM purge_incomplete_newrecs.
                  <cell> TYPE any.
 
   " Dùng bảng chỉ số để xóa theo INDEX (key mặc định)
-  DATA: lt_del     TYPE STANDARD TABLE OF i WITH DEFAULT KEY,
-        lv_missing TYPE abap_bool,
-        lv_key     TYPE dd03l-fieldname.
+  DATA: lt_del       TYPE STANDARD TABLE OF i WITH DEFAULT KEY,
+        lv_missing   TYPE abap_bool,
+        lv_key       TYPE dd03l-fieldname,
+        lv_purged    TYPE i VALUE 0,
+        lv_has_new   TYPE abap_bool VALUE abap_false,
+        ls_stbl      TYPE lvc_s_stbl.
+
+  CLEAR: ls_stbl. ls_stbl-row = 'X'. ls_stbl-col = 'X'.
 
   ASSIGN gr_data->* TO <lt>.
   IF <lt> IS NOT ASSIGNED OR <lt> IS INITIAL.
     RETURN.
   ENDIF.
 
+  " 1) Thu thập index các NEWREC thiếu khóa; đồng thời ghi nhận còn NEWREC nào không
   LOOP AT <lt> ASSIGNING <ls>.
     ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <new>.
     IF sy-subrc = 0 AND <new> = 'X'.
+      lv_has_new = abap_true. " có ít nhất một NEWREC trong lưới
       lv_missing = abap_false.
+
       LOOP AT gt_key_fields INTO lv_key.
         ASSIGN COMPONENT lv_key OF STRUCTURE <ls> TO <cell>.
         IF sy-subrc <> 0 OR <cell> IS INITIAL.
@@ -5642,19 +5932,56 @@ FORM purge_incomplete_newrecs.
           EXIT.
         ENDIF.
       ENDLOOP.
+
       IF lv_missing = abap_true.
         APPEND sy-tabix TO lt_del.
       ENDIF.
     ENDIF.
   ENDLOOP.
 
+  " 2) Xóa các dòng NEWREC thiếu khóa (xóa từ index lớn xuống để an toàn)
   IF lt_del IS NOT INITIAL.
     SORT lt_del DESCENDING.
+    DELETE ADJACENT DUPLICATES FROM lt_del.
     LOOP AT lt_del ASSIGNING FIELD-SYMBOL(<idx>).
       DELETE <lt> INDEX <idx>.
+      lv_purged = lv_purged + 1.
     ENDLOOP.
   ENDIF.
+
+  " 3) Kiểm tra sau khi xóa: còn NEWREC hợp lệ nào không?
+  "    Nếu KHÔNG còn NEWREC → tắt add mode để tránh khóa nhầm KEY các dòng cũ
+  IF lv_has_new = abap_true.
+    DATA(lv_still_has_new) = abap_false.
+    LOOP AT <lt> ASSIGNING <ls>.
+      ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <new>.
+      IF sy-subrc = 0 AND <new> = 'X'.
+        lv_still_has_new = abap_true.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_still_has_new = abap_false.
+      gv_add_mode = abap_false.
+    ENDIF.
+  ENDIF.
+
+  " 4) Áp lại editability & refresh ALV
+  PERFORM apply_editability_and_push.
+  IF g_alv_grid IS BOUND.
+    TRY.
+        g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
+        g_alv_grid->set_toolbar_interactive( ).
+      CATCH cx_root.
+    ENDTRY.
+  ENDIF.
+
+  " 5) Thông báo nhẹ cho người dùng (nếu có xóa)
+  IF lv_purged > 0.
+    MESSAGE |Đã bỏ { lv_purged } NEWREC thiếu khóa.| TYPE 'S'.
+  ENDIF.
 ENDFORM.
+
 
 FORM focus_key_on_newrec.
   FIELD-SYMBOLS: <lt>     TYPE STANDARD TABLE,
@@ -5713,7 +6040,7 @@ FORM analyze_change_state_detailed
 
   CLEAR: ev_has_change, ev_cnt_new_incomplete, ev_cnt_new_complete, ev_cnt_edited_existing.
 
-  " Đếm NEWREC và tình trạng khóa
+  " --- Đếm NEWREC & tình trạng khóa ---
   ASSIGN gr_data->* TO <lt>.
   IF <lt> IS ASSIGNED.
     LOOP AT <lt> ASSIGNING <ls>.
@@ -5730,79 +6057,165 @@ FORM analyze_change_state_detailed
         IF lv_is_key_missing = abap_true.
           ev_cnt_new_incomplete = ev_cnt_new_incomplete + 1.
         ELSE.
-          ev_cnt_new_complete = ev_cnt_new_complete + 1.
+          ev_cnt_new_complete   = ev_cnt_new_complete + 1.
         ENDIF.
       ENDIF.
     ENDLOOP.
   ENDIF.
 
-  " Đếm sửa dòng cũ: bạn đã set gv_dirty khi sửa non-NEWREC trong handle_data_changed
-  IF gv_dirty = abap_true.
-    ev_cnt_edited_existing = 1.
-  ENDIF.
+  ev_cnt_edited_existing = lines( gt_changed_existing_keys ).
 
-  IF ev_cnt_new_incomplete > 0 OR ev_cnt_new_complete > 0 OR ev_cnt_edited_existing > 0.
-    ev_has_change = abap_true.
-  ENDIF.
+  " --- Có thay đổi hay không? ---
+  ev_has_change = boolc( ev_cnt_new_incomplete > 0
+                      OR ev_cnt_new_complete   > 0
+                      OR ev_cnt_edited_existing > 0 ).
 
 ENDFORM.
-FORM ensure_rowcolor_component CHANGING cr_tab TYPE REF TO data.
-  DATA: lo_tab     TYPE REF TO cl_abap_tabledescr,
-        lo_line    TYPE REF TO cl_abap_structdescr,
-        lt_comp    TYPE abap_component_tab,
-        ls_comp    TYPE abap_componentdescr,
-        lo_any     TYPE REF TO cl_abap_typedescr,
-        lo_newline TYPE REF TO cl_abap_structdescr,
-        lo_newtab  TYPE REF TO cl_abap_tabledescr,
-        lr_new     TYPE REF TO data,
-        lr_row     TYPE REF TO data.
 
-  FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE,
-                 <lt_new> TYPE STANDARD TABLE,
-                 <ls_old> TYPE any,
-                 <ls_new> TYPE any.
 
-  IF cr_tab IS INITIAL.
+FORM build_key_fingerprint USING    is_row        TYPE any
+                                     it_keyfields  TYPE STANDARD TABLE
+                           CHANGING ev_fp         TYPE string.
+
+  FIELD-SYMBOLS: <kfld> TYPE dd03l-fieldname,
+                 <v>    TYPE any.
+
+  DATA lv_s TYPE string.
+
+  CLEAR ev_fp.
+
+  LOOP AT it_keyfields ASSIGNING <kfld>.
+    ASSIGN COMPONENT <kfld> OF STRUCTURE is_row TO <v>.
+    IF sy-subrc <> 0.
+      ev_fp = ev_fp && '|#|'.
+      CONTINUE.
+    ENDIF.
+    lv_s = <v>.
+    CONDENSE lv_s.
+    ev_fp = ev_fp && lv_s && '|#|'.
+  ENDLOOP.
+ENDFORM.
+
+
+
+FORM mark_row_error USING    ir_row TYPE any
+                             iv_msg TYPE string.
+
+  FIELD-SYMBOLS: <celltab> TYPE lvc_t_styl,
+                 <row_msg> TYPE any,
+                 <row_val> TYPE any.
+
+  " Tổ hợp: đổi style các cột KEY sang disabled + đổ màu đỏ qua ROW_COLOR nếu bạn muốn
+  ASSIGN COMPONENT 'CELLTAB' OF STRUCTURE ir_row TO <celltab>.
+  IF sy-subrc = 0 AND <celltab> IS ASSIGNED.
+    DATA ls_styl TYPE lvc_s_styl.
+    LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<k>).
+      CLEAR ls_styl.
+      ls_styl-fieldname = <k>.
+      ls_styl-style     = cl_gui_alv_grid=>mc_style_disabled.
+      INSERT ls_styl INTO TABLE <celltab>.
+    ENDLOOP.
+  ENDIF.
+
+  ASSIGN COMPONENT 'IS_ERROR'  OF STRUCTURE ir_row TO <row_val>.
+  IF sy-subrc = 0. <row_val> = 'X'. ENDIF.
+  ASSIGN COMPONENT 'IS_MESSAGE' OF STRUCTURE ir_row TO <row_msg>.
+  IF sy-subrc = 0. <row_msg> = iv_msg. ENDIF.
+ENDFORM.
+
+FORM make_row_key USING i_row TYPE any
+                  CHANGING e_key TYPE string.
+  DATA: lv_piece TYPE string.
+  FIELD-SYMBOLS: <cell> TYPE any.
+  CLEAR e_key.
+  LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<k>).
+    ASSIGN COMPONENT <k> OF STRUCTURE i_row TO <cell>.
+    IF sy-subrc = 0.
+      lv_piece = |{ <cell> }|.
+    ELSE.
+      lv_piece = ''.
+    ENDIF.
+    " dùng ^ như delimiter an toàn
+    e_key = COND string( WHEN e_key IS INITIAL THEN lv_piece ELSE e_key && '^' && lv_piece ).
+  ENDLOOP.
+ENDFORM.
+
+FORM check_newrec_duplicate_all
+  USING    iv_tabname                 TYPE tabname
+  CHANGING ev_has_dup                 TYPE abap_bool
+           ev_msg                     TYPE string
+           ev_first_offending_row_idx TYPE i.
+
+  FIELD-SYMBOLS: <lt>   TYPE STANDARD TABLE,
+                 <ls>   TYPE any,
+                 <new>  TYPE any,
+                 <cell> TYPE any.
+
+  DATA: lv_fp    TYPE string,
+        lv_where TYPE string,
+        lv_we    TYPE string.
+
+  CLEAR: ev_has_dup, ev_msg, ev_first_offending_row_idx.
+
+  ASSIGN gr_data->* TO <lt>.
+  IF <lt> IS NOT ASSIGNED OR <lt> IS INITIAL.
     RETURN.
   ENDIF.
 
-  " Mô tả kiểu hiện tại
-  lo_tab  ?= cl_abap_typedescr=>describe_by_data_ref( cr_tab ).
-  lo_line ?= lo_tab->get_table_line_type( ).
-  lt_comp  = lo_line->get_components( ).
+  " 1) Trùng khóa giữa các NEWREC trong lưới
+  TYPES: BEGIN OF ty_fp, fp TYPE string, idx TYPE i, END OF ty_fp.
+  DATA: lt_seen TYPE HASHED TABLE OF ty_fp WITH UNIQUE KEY fp,
+        ls_seen TYPE ty_fp.
 
-  " Đã có ROW_COLOR chưa?
-  LOOP AT lt_comp INTO ls_comp WHERE name = 'ROW_COLOR'.
-    RETURN.
+  LOOP AT <lt> ASSIGNING <ls>.
+    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <new>.
+    IF sy-subrc = 0 AND <new> = 'X'.
+      CLEAR lv_fp.
+      PERFORM build_key_fingerprint USING <ls> gt_key_fields CHANGING lv_fp.
+      IF lv_fp IS INITIAL.
+        CONTINUE.
+      ENDIF.
+
+      READ TABLE lt_seen WITH KEY fp = lv_fp INTO ls_seen.
+      IF sy-subrc = 0.
+        ev_has_dup = abap_true.
+        ev_first_offending_row_idx = sy-tabix.  " vẫn giữ để focus
+        ev_msg = |Khóa bị trùng giữa các dòng NEWREC trong lưới.|.
+        RETURN.
+      ELSE.
+        ls_seen-fp  = lv_fp.
+        ls_seen-idx = sy-tabix.
+        INSERT ls_seen INTO TABLE lt_seen.
+      ENDIF.
+    ENDIF.
   ENDLOOP.
 
-  " Thêm ROW_COLOR: LVC_T_SCOL
-  lo_any ?= cl_abap_typedescr=>describe_by_name( 'LVC_T_SCOL' ).
-  CLEAR ls_comp.
-  ls_comp-name = 'ROW_COLOR'.
-  ls_comp-type ?= lo_any.
-  APPEND ls_comp TO lt_comp.
+  " 2) Trùng khóa với DB (chỉ kiểm tra các NEWREC đủ khóa)
+  DATA lv_exist TYPE i.
+  LOOP AT <lt> ASSIGNING <ls>.
+    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <new>.
+    IF sy-subrc = 0 AND <new> = 'X'.
 
-  " Dựng lại line type
-  lo_newline = cl_abap_structdescr=>create( lt_comp ).
+      CLEAR: lv_where, lv_we, lv_exist.
+      PERFORM make_where_from_key USING <ls> gt_key_fields CHANGING lv_where lv_we.
+      IF lv_where IS INITIAL.
+        CONTINUE.
+      ENDIF.
 
-  " Dựng lại table type (giữ đơn giản để tương thích release cũ)
-  lo_newtab  = cl_abap_tabledescr=>create( p_line_type = lo_newline ).
+      SELECT COUNT( * ) FROM (iv_tabname) WHERE (lv_where) INTO @lv_exist.
+      IF lv_exist > 0.
+        ev_has_dup = abap_true.
+        ev_first_offending_row_idx = sy-tabix.  " vẫn trả về để caller focus
+        ev_msg = |Khóa đã tồn tại trên hệ thống.|.
+        RETURN.
+      ENDIF.
 
-  " Cấp phát & move dữ liệu cũ
-  ASSIGN cr_tab->* TO <lt_old>.
-  CREATE DATA lr_new TYPE HANDLE lo_newtab.
-  ASSIGN lr_new->* TO <lt_new>.
-
-  LOOP AT <lt_old> ASSIGNING <ls_old>.
-    CREATE DATA lr_row TYPE HANDLE lo_newline.
-    ASSIGN lr_row->* TO <ls_new>.
-    MOVE-CORRESPONDING <ls_old> TO <ls_new>.
-    APPEND <ls_new> TO <lt_new>.
+    ENDIF.
   ENDLOOP.
 
-  cr_tab = lr_new.
 ENDFORM.
+
+
 
 
 "===== ZFA25SAP23_DB =====
@@ -5963,11 +6376,17 @@ FORM load_data USING    iv_tab TYPE tabname
         IF sy-subrc <> 0.
           CASE lv_field.
             WHEN 'ERDAT'. PERFORM add_field_if_missing USING lv_field 'DATS' 8 lt_comp.
+                APPEND lv_field TO gt_added_audit_fields.
             WHEN 'ERTIM'. PERFORM add_field_if_missing USING lv_field 'TIMS' 6 lt_comp.
+                APPEND lv_field TO gt_added_audit_fields.
             WHEN 'ERNAM'. PERFORM add_field_if_missing USING lv_field 'CHAR' 12 lt_comp.
+                APPEND lv_field TO gt_added_audit_fields.
             WHEN 'AEDAT'. PERFORM add_field_if_missing USING lv_field 'DATS' 8 lt_comp.
+                APPEND lv_field TO gt_added_audit_fields.
             WHEN 'AETIM'. PERFORM add_field_if_missing USING lv_field 'TIMS' 6 lt_comp.
+                APPEND lv_field TO gt_added_audit_fields.
             WHEN 'AENAM'. PERFORM add_field_if_missing USING lv_field 'CHAR' 12 lt_comp.
+                APPEND lv_field TO gt_added_audit_fields.
           ENDCASE.
         ENDIF.
       ENDLOOP.
@@ -6567,6 +6986,7 @@ FORM normalize_itab_type CHANGING cr_tab TYPE REF TO data.
 ENDFORM.
 
 
+
 "===== ZFA25SAP23_MAIN =====
 START-OF-SELECTION.
 
@@ -6607,5 +7027,6 @@ PERFORM reorder_audit_cols CHANGING gt_fieldcat.
 
 " 6. Gọi screen hiển thị ALV
 CALL SCREEN 100.
+
 
 
