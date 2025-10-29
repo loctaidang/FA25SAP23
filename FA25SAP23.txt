@@ -27,7 +27,6 @@ CLASS lcl_alv_handler DEFINITION DEFERRED.
 
 DATA: gv_toolbar_mode TYPE c LENGTH 1 VALUE 'D'. " 'D' = display, 'E' = edit
 
-
 "––– Dữ liệu động (itab) cho mọi bảng
 DATA: gr_data TYPE REF TO data.
 FIELD-SYMBOLS: <gt_data> TYPE STANDARD TABLE,
@@ -104,7 +103,6 @@ DATA gt_tb_excl TYPE ui_functions.
 TYPES: ty_keyhash TYPE string.
 DATA: gt_changed_existing_keys TYPE HASHED TABLE OF ty_keyhash WITH UNIQUE KEY table_line.
 DATA gv_in_upload TYPE abap_bool VALUE abap_false.
-
 
 
 "===== INCLUDE ZFA25SAP23_SEL =====
@@ -193,8 +191,6 @@ FORM f4_tabname.
 ENDFORM.
 
 
-
-
 *----------------------------------------------------------------------*
 *  Include: ZFA25SAP23_AUTH
 *----------------------------------------------------------------------*
@@ -237,8 +233,6 @@ FORM has_actvt USING iv_act TYPE activ_auth CHANGING ev_ok TYPE abap_bool.
     ev_ok = abap_true.
   ENDIF.
 ENDFORM.
-
-
 
 
 *&---------------------------------------------------------------------*
@@ -825,8 +819,6 @@ FORM add_fc_tech_if_missing USING iv_field  TYPE lvc_fname
 ENDFORM.
 
 
-
-
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_ALV
 *&---------------------------------------------------------------------*
@@ -1087,7 +1079,7 @@ METHOD handle_user_command.
           display_cancel_button = 'X'
         IMPORTING
           answer                = lv_ans.
-      CASE lv_ans.
+CASE lv_ans.
         WHEN '1'.
           PERFORM on_save.
           " Nếu lưu LỖI, on_save sẽ giữ ở Edit -> dừng
@@ -1104,6 +1096,7 @@ METHOD handle_user_command.
           PERFORM discard_unsaved_changes.
           lv_discarded_by_prompt = abap_true.
       ENDCASE.
+
 
     ELSEIF lv_edit_existing_cnt > 0
        AND lv_new_incomplete_cnt = 0
@@ -2710,15 +2703,15 @@ FORM upload_data_strict_match.
   ENDIF.
 
   lv_filename = ls_file-filename.
-"=== Tạo bảng tạm chứa dữ liệu Excel ===
-DATA: lr_upload TYPE REF TO data,
-      lr_desc   TYPE REF TO cl_abap_tabledescr.
+  "=== Tạo bảng tạm chứa dữ liệu Excel ===
+  DATA: lr_upload TYPE REF TO data,
+        lr_desc   TYPE REF TO cl_abap_tabledescr.
 
-FIELD-SYMBOLS: <lt_upload> TYPE STANDARD TABLE.
+  FIELD-SYMBOLS: <lt_upload> TYPE STANDARD TABLE.
 
-lr_desc ?= cl_abap_tabledescr=>describe_by_data_ref( gr_data ).
-CREATE DATA lr_upload TYPE HANDLE lr_desc.
-ASSIGN lr_upload->* TO <lt_upload>.
+  lr_desc ?= cl_abap_tabledescr=>describe_by_data_ref( gr_data ).
+  CREATE DATA lr_upload TYPE HANDLE lr_desc.
+  ASSIGN lr_upload->* TO <lt_upload>.
   "=== 2) Đọc dữ liệu Excel ===
   IF lv_filename CP '*.xlsx' OR lv_filename CP '*.XLSX'.
     PERFORM read_xlsx_clfdt USING lv_filename CHANGING lr_cells lt_header.
@@ -3050,98 +3043,113 @@ ASSIGN lr_upload->* TO <lt_upload>.
     ENDIF.
   ENDLOOP.
   "=== ✅ STEP 3: Merge dữ liệu Excel vào ALV hiện tại (preview) ===
-FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
-ASSIGN gr_data->* TO <lt_alv>.
+  FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
+  ASSIGN gr_data->* TO <lt_alv>.
 
-IF <lt_alv> IS ASSIGNED.
+  IF <lt_alv> IS ASSIGNED.
 
-  "--- Sao bản ALV cũ
-DATA: lr_old  TYPE REF TO data.
-
-
-FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE.
-
-" Lấy mô tả kiểu từ ALV chính
-lr_desc ?= cl_abap_tabledescr=>describe_by_data_ref( gr_data ).
-
-" Tạo bảng mới cùng kiểu
-CREATE DATA lr_old TYPE HANDLE lr_desc.
-ASSIGN lr_old->* TO <lt_old>.
-
-<lt_old> = <lt_alv>.
+    "--- Sao bản ALV cũ
+    DATA: lr_old  TYPE REF TO data.
 
 
-  "--- Bảng merge kết quả
-DATA lr_merge TYPE REF TO data.
-FIELD-SYMBOLS: <lt_merge> TYPE STANDARD TABLE.
+    FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE.
 
-" Sử dụng lại lr_desc đã có (được mô tả từ gr_data)
-CREATE DATA lr_merge TYPE HANDLE lr_desc.
-ASSIGN lr_merge->* TO <lt_merge>.
+    " Lấy mô tả kiểu từ ALV chính
+    lr_desc ?= cl_abap_tabledescr=>describe_by_data_ref( gr_data ).
+
+    " Tạo bảng mới cùng kiểu
+    CREATE DATA lr_old TYPE HANDLE lr_desc.
+    ASSIGN lr_old->* TO <lt_old>.
+
+    <lt_old> = <lt_alv>.
 
 
-  "--- 1) Giữ lại dòng cũ không có trong Excel
-  LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old>).
-    DATA(lv_exist) = abap_false.
-    LOOP AT <lt_upload> ASSIGNING FIELD-SYMBOL(<ls_up>).
-      DATA(lv_samekey) = abap_true.
-      LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld>).
-        FIELD-SYMBOLS: <v1> TYPE any, <v2> TYPE any.
-        ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_old> TO <v1>.
-        ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_up>  TO <v2>.
-        IF |{ <v1> }| <> |{ <v2> }|.
-          lv_samekey = abap_false.
+    "--- Bảng merge kết quả
+    DATA lr_merge TYPE REF TO data.
+    FIELD-SYMBOLS: <lt_merge> TYPE STANDARD TABLE.
+
+    " Sử dụng lại lr_desc đã có (được mô tả từ gr_data)
+    CREATE DATA lr_merge TYPE HANDLE lr_desc.
+    ASSIGN lr_merge->* TO <lt_merge>.
+
+
+    "--- 1) Giữ lại dòng cũ không có trong Excel
+    LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old>).
+      DATA(lv_exist) = abap_false.
+      LOOP AT <lt_upload> ASSIGNING FIELD-SYMBOL(<ls_up>).
+        DATA(lv_samekey) = abap_true.
+        LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld>).
+          FIELD-SYMBOLS: <v1> TYPE any, <v2> TYPE any.
+          ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_old> TO <v1>.
+          ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_up>  TO <v2>.
+          IF |{ <v1> }| <> |{ <v2> }|.
+            lv_samekey = abap_false.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+        IF lv_samekey = abap_true.
+          lv_exist = abap_true.
           EXIT.
         ENDIF.
       ENDLOOP.
-      IF lv_samekey = abap_true.
-        lv_exist = abap_true.
-        EXIT.
+      IF lv_exist = abap_false.
+        APPEND <ls_old> TO <lt_merge>.
       ENDIF.
     ENDLOOP.
-    IF lv_exist = abap_false.
-      APPEND <ls_old> TO <lt_merge>.
-    ENDIF.
-  ENDLOOP.
 
-  "--- 2) Thêm hoặc cập nhật dòng từ Excel
-  LOOP AT <lt_upload> ASSIGNING FIELD-SYMBOL(<ls_new>).
-    DATA(lv_found) = abap_false.
-    LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old2>).
-      DATA(lv_match) = abap_true.
-      LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld2>).
-        FIELD-SYMBOLS: <vo> TYPE any, <vn> TYPE any.
-        ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_old2> TO <vo>.
-        ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_new>  TO <vn>.
-        IF |{ <vo> }| <> |{ <vn> }|.
-          lv_match = abap_false.
+    "--- 2) Thêm hoặc cập nhật dòng từ Excel
+    LOOP AT <lt_upload> ASSIGNING FIELD-SYMBOL(<ls_new>).
+      DATA(lv_found) = abap_false.
+      LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old2>).
+        DATA(lv_match) = abap_true.
+        LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld2>).
+          FIELD-SYMBOLS: <vo> TYPE any, <vn> TYPE any.
+          ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_old2> TO <vo>.
+          ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_new>  TO <vn>.
+          IF |{ <vo> }| <> |{ <vn> }|.
+            lv_match = abap_false.
+            EXIT.
+          ENDIF.
+        ENDLOOP.
+        IF lv_match = abap_true.
+          APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_m>).
+*        MOVE-CORRESPONDING <ls_old2> TO <ls_m>.
+*        MOVE-CORRESPONDING <ls_new>  TO <ls_m>.
+          " Copy full record cũ
+          MOVE-CORRESPONDING <ls_old2> TO <ls_m>.
+
+          " Ghi đè chỉ các field có trong Excel và có giá trị
+          DO.
+            ASSIGN COMPONENT sy-index OF STRUCTURE <ls_new> TO FIELD-SYMBOL(<v_new>).
+            ASSIGN COMPONENT sy-index OF STRUCTURE <ls_m>   TO FIELD-SYMBOL(<v_merge>).
+            IF sy-subrc <> 0 OR <v_new> IS NOT ASSIGNED OR <v_merge> IS NOT ASSIGNED.
+              EXIT.
+            ENDIF.
+            IF <v_new> IS NOT INITIAL.
+              <v_merge> = <v_new>.
+            ENDIF.
+          ENDDO.
+
+          lv_found = abap_true.
           EXIT.
         ENDIF.
       ENDLOOP.
-      IF lv_match = abap_true.
-        APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_m>).
-        MOVE-CORRESPONDING <ls_old2> TO <ls_m>.
-        MOVE-CORRESPONDING <ls_new>  TO <ls_m>.
-        lv_found = abap_true.
-        EXIT.
+      IF lv_found = abap_false.
+        APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_add>).
+        MOVE-CORRESPONDING <ls_new> TO <ls_add>.
       ENDIF.
     ENDLOOP.
-    IF lv_found = abap_false.
-      APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_add>).
-      MOVE-CORRESPONDING <ls_new> TO <ls_add>.
-    ENDIF.
-  ENDLOOP.
 
-  "--- Gán lại dữ liệu preview
-  <lt_alv> = <lt_merge>.
-ENDIF.
+    "--- Gán lại dữ liệu preview
+    <lt_alv> = <lt_merge>.
+  ENDIF.
 
-"--- Refresh hiển thị preview
-PERFORM set_color.
-IF g_alv_grid IS BOUND.
-  g_alv_grid->refresh_table_display(
-    EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-ENDIF.
+  "--- Refresh hiển thị preview
+  PERFORM set_color.
+  IF g_alv_grid IS BOUND.
+    g_alv_grid->refresh_table_display(
+      EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+  ENDIF.
 
   "-----------------------------------------------------------
   " 🔹 [5] Kiểm tra trùng khóa chính trong Excel
@@ -3248,133 +3256,114 @@ ENDIF.
       <newrec> = 'X'.
     ENDIF.
   ENDLOOP.
-*  "=== 7c) Cập nhật logic insert/update cho 6 field audit ===
-*  DATA: lv_tabname TYPE tabname,
-*        lv_user    TYPE sy-uname,
-*        lv_tzone   TYPE tznzone,
-*        lv_ts      TYPE timestamp.
+  "=== 7c) Cập nhật logic insert/update cho 6 field audit ===
+  DATA: lv_tabname TYPE tabname,
+        lv_user    TYPE sy-uname,
+        lv_tzone   TYPE tznzone,
+        lv_ts      TYPE timestamp.
+
+  lv_tabname = p_tab.
+  lv_user    = sy-uname.
+
+  " Lấy timezone thật của user (ví dụ ICT cho Việt Nam)
+  TRY.
+      lv_tzone = cl_abap_context_info=>get_user_time_zone( ).
+    CATCH cx_abap_context_info_error.
+      lv_tzone = 'UTC'.
+  ENDTRY.
+
+  GET TIME STAMP FIELD lv_ts.
+  CONVERT TIME STAMP lv_ts TIME ZONE lv_tzone INTO DATE lv_date TIME lv_time.
+
+  " Duyệt dữ liệu ALV hiện tại (đã merge)
+  ASSIGN gr_data->* TO <lt_alv>.
+
+  LOOP AT <lt_alv> ASSIGNING <ls_data>.
+    FIELD-SYMBOLS: <val_old> TYPE any,
+                   <val_new> TYPE any.
+
+    " Xây WHERE theo key để check record trong DB
+    DATA(lv_where) = VALUE string( ).
+    LOOP AT gt_key_fields ASSIGNING <keyfld>.
+      ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_key>).
+      IF <lv_key> IS ASSIGNED.
+        IF lv_where IS INITIAL.
+          lv_where = |{ <keyfld> } = '{ <lv_key> }'|.
+        ELSE.
+          lv_where = |{ lv_where } AND { <keyfld> } = '{ <lv_key> }'|.
+        ENDIF.
+      ENDIF.
+    ENDLOOP.
+
+    " Tạo record tạm để đọc DB
+    DATA(lo_struct) = CAST cl_abap_structdescr( cl_abap_typedescr=>describe_by_name( lv_tabname ) ).
+    DATA lr_db TYPE REF TO data.
+    CREATE DATA lr_db TYPE HANDLE lo_struct.
+    ASSIGN lr_db->* TO FIELD-SYMBOL(<ls_db>).
+
+    SELECT SINGLE * FROM (lv_tabname) INTO @<ls_db> WHERE (lv_where).
+
+    IF sy-subrc = 0.
+      " 🔹 Record đã tồn tại → kiểm tra thay đổi
+      DATA(lv_changed) = abap_false.
+
+      LOOP AT lt_ddic_fields INTO DATA(ls_field).
+        " Bỏ qua các field kỹ thuật
+        IF ls_field-fieldname = 'MANDT'
+           OR ls_field-fieldname CP 'AE*'
+           OR ls_field-fieldname CP 'ER*'.
+          CONTINUE.
+        ENDIF.
+
+        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
+        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db>  TO <val_old>.
+
+        IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
+          DATA(lv_new_str) = |{ <val_new> }|.
+          DATA(lv_old_str) = |{ <val_old> }|.
+          CONDENSE lv_new_str.
+          CONDENSE lv_old_str.
+
+          IF lv_new_str <> lv_old_str.
+            lv_changed = abap_true.
+            EXIT.
+          ENDIF.
+        ENDIF.
+      ENDLOOP.
+
+      IF lv_changed = abap_true.
+        ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat>).
+        IF <lv_aedat> IS ASSIGNED. <lv_aedat> = lv_date. ENDIF.
+
+        ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim>).
+        IF <lv_aetim> IS ASSIGNED. <lv_aetim> = lv_time. ENDIF.
+
+        ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam>).
+        IF <lv_aenam> IS ASSIGNED. <lv_aenam> = lv_user. ENDIF.
+      ENDIF.
+
+    ELSE.
+      " 🔹 Record mới → set Create*, clear Change*
+      ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_erdat>).
+      IF <lv_erdat> IS ASSIGNED. <lv_erdat> = lv_date. ENDIF.
+
+      ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ertim>).
+      IF <lv_ertim> IS ASSIGNED. <lv_ertim> = lv_time. ENDIF.
+
+      ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ernam>).
+      IF <lv_ernam> IS ASSIGNED. <lv_ernam> = lv_user. ENDIF.
+    ENDIF.
+
+  ENDLOOP.
+
+*  " Ghi xuống DB thật
+*  DATA lr_db2 TYPE REF TO data.
+*  CREATE DATA lr_db2 TYPE HANDLE lo_struct.
+*  ASSIGN lr_db2->* TO FIELD-SYMBOL(<ls_dbwa>).
 *
-*
-*  lv_tabname = p_tab.
-*  lv_user = sy-uname.
-*
-*  " Lấy timezone thật của user (ví dụ ICT cho Việt Nam)
-*  TRY.
-*      lv_tzone = cl_abap_context_info=>get_user_time_zone( ).
-*    CATCH cx_abap_context_info_error.
-*      lv_tzone = 'UTC'. " fallback
-*  ENDTRY.
-*
-*  " Chuyển UTC sang giờ địa phương
-*  GET TIME STAMP FIELD lv_ts.
-*  CONVERT TIME STAMP lv_ts TIME ZONE lv_tzone INTO DATE lv_date TIME lv_time.
-*
-*
-*  " Lấy mô tả cấu trúc bảng đích
-*  DATA(lo_struct) = CAST cl_abap_structdescr( cl_abap_typedescr=>describe_by_name( lv_tabname ) ).
-*  DATA lr_db TYPE REF TO data.
-*  CREATE DATA lr_db TYPE HANDLE lo_struct.
-*
-*  LOOP AT <lt_data> ASSIGNING <ls_data>.
-*    FIELD-SYMBOLS: <ls_db>   TYPE any,
-*                   <val_new> TYPE any,
-*                   <val_old> TYPE any.
-*
-*    " Tạo bản ghi động theo cấu trúc bảng
-*    CREATE DATA lr_db TYPE HANDLE lo_struct.
-*    ASSIGN lr_db->* TO <ls_db>.
-*
-*    " Xây WHERE theo key
-*    DATA(lv_where) = VALUE string( ).
-*    LOOP AT lt_ddic_fields INTO DATA(ls_field) WHERE keyflag = 'X' AND fieldname <> 'MANDT'.
-*      ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_key>).
-*      IF <lv_key> IS ASSIGNED.
-*        IF lv_where IS INITIAL.
-*          lv_where = |{ ls_field-fieldname } = '{ <lv_key> }'|.
-*        ELSE.
-*          lv_where = |{ lv_where } AND { ls_field-fieldname } = '{ <lv_key> }'|.
-*        ENDIF.
-*      ENDIF.
-*    ENDLOOP.
-*
-*    " Tìm record trong DB
-*    SELECT SINGLE * FROM (lv_tabname) INTO @<ls_db> WHERE (lv_where).
-*
-*    IF sy-subrc = 0.
-*      " --- Record đã có → kiểm tra thay đổi thực tế (ngoại trừ các field audit)
-*      DATA(lv_changed) = abap_false.
-*
-*      LOOP AT lt_ddic_fields INTO ls_field WHERE fieldname <> 'MANDT'.
-*        IF ls_field-fieldname CP 'AE*' OR ls_field-fieldname CP 'ER*'.
-*          CONTINUE.
-*        ENDIF.
-*
-*
-*
-*        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
-*        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db>  TO <val_old>.
-*
-*        IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
-*          DATA(lv_new_str) = |{ <val_new> }|.
-*          DATA(lv_old_str) = |{ <val_old> }|.
-*          CONDENSE lv_new_str.
-*          CONDENSE lv_old_str.
-*
-*          IF lv_new_str <> lv_old_str.
-*            <val_old> = <val_new>.
-*            lv_changed = abap_true.
-*          ENDIF.
-*        ENDIF.
-*      ENDLOOP.
-*
-*      " --- Nếu có thay đổi → cập nhật 3 cột Changed*, giữ nguyên Created*
-*      IF lv_changed = abap_true.
-*        ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat>).
-*        IF <lv_aedat> IS ASSIGNED. <lv_aedat> = lv_date. ENDIF.
-*
-*        ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim>).
-*        IF <lv_aetim> IS ASSIGNED. <lv_aetim> = lv_time. ENDIF.
-*
-*        ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam>).
-*        IF <lv_aenam> IS ASSIGNED. <lv_aenam> = lv_user. ENDIF.
-*
-*      ELSE.
-*        " --- Không thay đổi → giữ nguyên toàn bộ 6 field audit (copy lại từ DB)
-*        LOOP AT lt_ddic_fields INTO ls_field WHERE fieldname CP 'AE*' OR fieldname CP 'ER*'.
-*          ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db> TO <val_old>.
-*          ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
-*          IF <val_old> IS ASSIGNED AND <val_new> IS ASSIGNED.
-*            <val_new> = <val_old>.
-*          ENDIF.
-*        ENDLOOP.
-*      ENDIF.
-*
-*    ELSE.
-*      " --- Record mới → set 3 cột Create*, clear 3 cột Change*
-*      ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_erdat>).
-*      IF <lv_erdat> IS ASSIGNED. <lv_erdat> = lv_date. ENDIF.
-*
-*      ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ertim>).
-*      IF <lv_ertim> IS ASSIGNED. <lv_ertim> = lv_time. ENDIF.
-*
-*      ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ernam>).
-*      IF <lv_ernam> IS ASSIGNED. <lv_ernam> = lv_user. ENDIF.
-*
-*    ENDIF.
-*
-*
-*  ENDLOOP.
-*  "=== 🔹 Ghi dữ liệu thật xuống DB sau khi set audit ===
-*  CREATE DATA lr_db TYPE HANDLE lo_struct.
-*  FIELD-SYMBOLS: <ls_dbwa> TYPE any.
-*  ASSIGN lr_db->* TO <ls_dbwa>.
-*
-*  LOOP AT <lt_data> ASSIGNING <ls_data>.
+*  LOOP AT <lt_alv> ASSIGNING <ls_data>.
 *    CLEAR <ls_dbwa>.
-*    " --- Copy chỉ các field có trong bảng DDIC ---
 *    MOVE-CORRESPONDING <ls_data> TO <ls_dbwa>.
-*
-*    " --- Update, nếu không có thì Insert ---
 *    UPDATE (lv_tabname) FROM <ls_dbwa>.
 *    IF sy-subrc <> 0.
 *      INSERT (lv_tabname) FROM <ls_dbwa>.
@@ -3382,144 +3371,6 @@ ENDIF.
 *  ENDLOOP.
 *
 *  COMMIT WORK AND WAIT.
-
-*"=== ✅ Merge dữ liệu upload vào ALV hiện có (an toàn, không dump) ===
-*FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
-*ASSIGN gr_data->* TO <lt_alv>.
-*IF <lt_alv> IS NOT ASSIGNED.
-*  RETURN.
-*ENDIF.
-*
-*"--- Tạo bản sao tách biệt của ALV hiện tại ---
-*DATA: lr_old TYPE REF TO data,
-*      lr_desc TYPE REF TO cl_abap_tabledescr.
-*FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE.
-*
-*lr_desc ?= cl_abap_tabledescr=>describe_by_data_ref( gr_data ).
-*CREATE DATA lr_old TYPE HANDLE lr_desc.
-*ASSIGN lr_old->* TO <lt_old>.
-*<lt_old> = <lt_alv>. " copy an toàn
-*
-*"--- Làm trống ALV để merge mới ---
-**REFRESH <lt_alv>.
-*
-*"--- Dùng tạm bảng trung gian để chứa kết quả merge ---
-*DATA: lr_merge TYPE REF TO data.
-*CREATE DATA lr_merge TYPE HANDLE lr_desc.
-*FIELD-SYMBOLS: <lt_merge> TYPE STANDARD TABLE.
-*ASSIGN lr_merge->* TO <lt_merge>.
-*
-*"--- 1) Giữ lại dòng cũ không có trong Excel ---
-*LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old>).
-*  DATA(lv_exist) = abap_false.
-*
-*  LOOP AT <lt_data> ASSIGNING FIELD-SYMBOL(<ls_up>).
-*    DATA(lv_match) = abap_true.
-*
-*    LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld>).
-*      FIELD-SYMBOLS: <v_old> TYPE any, <v_up> TYPE any.
-*      ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_old> TO <v_old>.
-*      ASSIGN COMPONENT <keyfld> OF STRUCTURE <ls_up>  TO <v_up>.
-*      IF <v_old> <> <v_up>.
-*        lv_match = abap_false.
-*        EXIT.
-*      ENDIF.
-*    ENDLOOP.
-*
-*    IF lv_match = abap_true.
-*      lv_exist = abap_true.
-*      EXIT.
-*    ENDIF.
-*  ENDLOOP.
-*
-*  IF lv_exist = abap_false.
-*    APPEND <ls_old> TO <lt_merge>.
-*  ENDIF.
-*ENDLOOP.
-*
-*"--- 2) Thêm hoặc cập nhật các dòng từ file Excel ---
-**LOOP AT <lt_data> ASSIGNING FIELD-SYMBOL(<ls_new>).
-**  APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_merge_row>).
-**  MOVE-CORRESPONDING <ls_new> TO <ls_merge_row>.
-**ENDLOOP.
-*"--- 2) Thêm hoặc cập nhật các dòng từ file Excel ---
-*LOOP AT <lt_data> ASSIGNING FIELD-SYMBOL(<ls_new>).
-*  DATA(lv_found) = abap_false.
-*
-*  LOOP AT <lt_old> ASSIGNING FIELD-SYMBOL(<ls_old2>).
-*    DATA(lv_samekey) = abap_true.
-*
-*    LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld2>).
-*      FIELD-SYMBOLS: <v_old2> TYPE any, <v_new2> TYPE any.
-*      ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_old2> TO <v_old2>.
-*      ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_new>  TO <v_new2>.
-*      IF <v_old2> <> <v_new2>.
-*        lv_samekey = abap_false.
-*        EXIT.
-*      ENDIF.
-*    ENDLOOP.
-*
-*    IF lv_samekey = abap_true.
-*      " 🔹 Record trùng khóa → cập nhật field mới nhưng giữ field cũ
-*      APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_merge_row2>).
-*      MOVE-CORRESPONDING <ls_old2> TO <ls_merge_row2>.
-*      MOVE-CORRESPONDING <ls_new>  TO <ls_merge_row2>.
-*      lv_found = abap_true.
-*      EXIT.
-*    ENDIF.
-*  ENDLOOP.
-*
-*  IF lv_found = abap_false.
-*    " 🔹 Record hoàn toàn mới → thêm mới
-*    APPEND INITIAL LINE TO <lt_merge> ASSIGNING FIELD-SYMBOL(<ls_merge_row3>).
-*    MOVE-CORRESPONDING <ls_new> TO <ls_merge_row3>.
-*  ENDIF.
-*ENDLOOP.
-*
-*
-*"--- 3) Copy ngược lại về ALV chính ---
-*<lt_alv> = <lt_merge>.
-*
-*"--- 4) Refresh ALV hiển thị ---
-*
-*IF g_alv_grid IS BOUND.
-*  g_alv_grid->refresh_table_display(
-*    EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-*ENDIF.
-
-
-
-
-
-*  "=== 🔄 Reload lại dữ liệu DB sau khi ghi ===
-*  DATA: lr_temp TYPE REF TO data.
-*  CREATE DATA lr_temp TYPE TABLE OF (lv_tabname).
-*  ASSIGN lr_temp->* TO FIELD-SYMBOL(<lt_temp>).
-*
-*  SELECT * FROM (lv_tabname) INTO TABLE @<lt_temp> BYPASSING BUFFER.
-*
-*  FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
-*  ASSIGN gr_data->* TO <lt_alv>.
-*
-*  IF <lt_alv> IS ASSIGNED.
-*    REFRESH <lt_alv>.
-*    LOOP AT <lt_temp> ASSIGNING FIELD-SYMBOL(<ls_temp>).
-*      APPEND INITIAL LINE TO <lt_alv> ASSIGNING FIELD-SYMBOL(<ls_alv>).
-*      MOVE-CORRESPONDING <ls_temp> TO <ls_alv>.
-*    ENDLOOP.
-*
-*    PERFORM merge_audit_log USING lv_tabname CHANGING <lt_alv>.
-*  ENDIF.
-*
-*  IF g_alv_grid IS BOUND.
-*    g_alv_grid->refresh_table_display(
-*      EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-*  ENDIF.
-
-
-
-
-
 
   DESCRIBE TABLE <lt_data> LINES DATA(lv_count).
   IF lv_count = 0.
@@ -3826,7 +3677,6 @@ FORM set_color.
   ENDIF.
 
 ENDFORM.
-
 
 
 *&---------------------------------------------------------------------*
@@ -4575,6 +4425,10 @@ FORM on_save.
     ENDLOOP.
   ENDIF.
 CLEAR gt_changed_existing_keys.
+
+" ===sort + refresh
+PERFORM resort_and_refresh_alv.
+
   " 8) Về View mode
   gv_dirty        = abap_false.
   gv_add_mode     = abap_false.
@@ -6217,7 +6071,6 @@ ENDFORM.
 
 
 
-
 "===== ZFA25SAP23_DB =====
 
 " Tạo itab động dựa trên tên bảng
@@ -6522,8 +6375,6 @@ FORM load_data USING    iv_tab TYPE tabname
   ENDLOOP.
 
 ENDFORM.
-
-
 
 
 
@@ -6986,7 +6837,6 @@ FORM normalize_itab_type CHANGING cr_tab TYPE REF TO data.
 ENDFORM.
 
 
-
 "===== ZFA25SAP23_MAIN =====
 START-OF-SELECTION.
 
@@ -7027,6 +6877,5 @@ PERFORM reorder_audit_cols CHANGING gt_fieldcat.
 
 " 6. Gọi screen hiển thị ALV
 CALL SCREEN 100.
-
 
 
