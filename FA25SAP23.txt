@@ -18,6 +18,7 @@ INCLUDE zfa25sap23_f01.     "FORM rollBack"
 *&---------------------------------------------------------------------*
 
 
+
 "===== INCLUDE ZFA25SAP23_TOP =====
 " Global declarations dùng chung cho DB/ALV/MAIN
 
@@ -45,6 +46,7 @@ TYPES: BEGIN OF ty_error_log,
 DATA: gt_error_log TYPE ty_t_error_log.
 DATA gv_keys_tabname TYPE tabname.
 
+
 "––– Cấu trúc style để highlight lỗi trong ALV
 TYPES: BEGIN OF ty_cell_style,
          fieldname TYPE fieldname,
@@ -59,6 +61,9 @@ DATA: g_container TYPE REF TO cl_gui_custom_container,
       g_okcode    TYPE sy-ucomm,
       g_handler   TYPE REF TO lcl_alv_handler,
       gv_edit_md  TYPE abap_bool VALUE abap_false. " =SPACE: VIEW, 'X': EDIT
+
+      DATA: gt_dc_del_rows TYPE lvc_t_roid, " giữ danh sách dòng ALV báo xóa
+      gv_from_dc     TYPE abap_bool.  " cờ: xóa từ data_changed (phím Delete)
 
 DATA: gt_fieldcat TYPE lvc_t_fcat,
       gs_fieldcat TYPE lvc_s_fcat,
@@ -89,6 +94,7 @@ DATA gv_dirty TYPE abap_bool VALUE abap_false.
 DATA gv_del_newrec_only TYPE abap_bool VALUE abap_false.
 DATA: gv_dirty_nonnewrec TYPE abap_bool VALUE abap_false.
 
+
 TYPES: ty_fname TYPE lvc_fname.
 DATA: gt_f4_whitelist TYPE HASHED TABLE OF ty_fname WITH UNIQUE KEY table_line,
       gt_f4_blacklist TYPE HASHED TABLE OF ty_fname WITH UNIQUE KEY table_line.
@@ -104,6 +110,9 @@ DATA gt_tb_excl TYPE ui_functions.
 TYPES: ty_keyhash TYPE string.
 DATA: gt_changed_existing_keys TYPE HASHED TABLE OF ty_keyhash WITH UNIQUE KEY table_line.
 DATA gv_in_upload TYPE abap_bool VALUE abap_false.
+
+
+
 
 "===== INCLUDE ZFA25SAP23_SEL =====
 
@@ -190,6 +199,9 @@ FORM f4_tabname.
   ENDIF.
 ENDFORM.
 
+
+
+
 *----------------------------------------------------------------------*
 *  Include: ZFA25SAP23_AUTH
 *----------------------------------------------------------------------*
@@ -232,6 +244,9 @@ FORM has_actvt USING iv_act TYPE activ_auth CHANGING ev_ok TYPE abap_bool.
     ev_ok = abap_true.
   ENDIF.
 ENDFORM.
+
+
+
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_DDIC
@@ -757,6 +772,9 @@ FORM add_fc_tech_if_missing USING iv_field  TYPE lvc_fname
   ENDIF.
 ENDFORM.
 
+
+
+
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_ALV
 *&---------------------------------------------------------------------*
@@ -932,6 +950,7 @@ CLASS lcl_alv_handler IMPLEMENTATION.
           lv_skip_unsaved_check TYPE abap_bool VALUE abap_false,
           lv_ok                 TYPE abap_bool.
 
+
     " NEW: biết có lưu/huỷ thay đổi do popup hay không
     DATA: lv_saved_by_prompt     TYPE abap_bool VALUE abap_false,
           lv_discarded_by_prompt TYPE abap_bool VALUE abap_false.
@@ -954,6 +973,7 @@ CLASS lcl_alv_handler IMPLEMENTATION.
     IF g_alv_grid IS BOUND.
       TRY. g_alv_grid->check_changed_data( ). CATCH cx_root. ENDTRY.
     ENDIF.
+
 
     IF e_ucomm = 'DELE' OR e_ucomm = 'ADD'.
       lv_skip_unsaved_check = abap_true.
@@ -1259,7 +1279,7 @@ CLASS lcl_alv_handler IMPLEMENTATION.
           ENDIF.
         ENDIF.
 
-       WHEN 'SAVE'.
+      WHEN 'SAVE'.
         PERFORM has_actvt USING '02' CHANGING lv_ok.
         IF lv_ok IS INITIAL.
           MESSAGE 'Bạn không có quyền Change (ACTVT=02).' TYPE 'S' DISPLAY LIKE 'E'.
@@ -1629,20 +1649,27 @@ CLASS lcl_alv_handler IMPLEMENTATION.
     ENDIF.
   ENDMETHOD.
 
-  METHOD handle_data_changed.
-    DATA: lt_mod TYPE lvc_t_modi,
-          ls_mod TYPE lvc_s_modi.
+METHOD handle_data_changed.
+  DATA: lt_mod     TYPE lvc_t_modi,
+        ls_mod     TYPE lvc_s_modi,
+        lt_dc_rows TYPE lvc_t_roid,    " ALV báo dòng bị xóa
+        ls_dc_row  TYPE lvc_s_roid,
+        ls_stbl    TYPE lvc_s_stbl,
+        lv_msg_dc  TYPE string,  " đổi sang C(200) cho khớp FORM
+        lv_err_dc  TYPE string.
 
-    FIELD-SYMBOLS: <outtab> TYPE STANDARD TABLE,
-                   <row>    TYPE any,
-                   <cell>   TYPE any.
+  FIELD-SYMBOLS: <outtab> TYPE STANDARD TABLE,
+                 <row>    TYPE any,
+                 <cell>   TYPE any.
 
-    ASSIGN gr_data->* TO <outtab>.
-    IF <outtab> IS NOT ASSIGNED.
-      RETURN.
-    ENDIF.
+  ASSIGN gr_data->* TO <outtab>.
+  IF <outtab> IS NOT ASSIGNED.
+    RETURN.
+  ENDIF.
+
 
     lt_mod = er_data_changed->mt_mod_cells.
+
 
     " Danh sách cột audit cần khóa tuyệt đối
     DATA: lt_audit TYPE TABLE OF lvc_fname WITH DEFAULT KEY.
@@ -1865,11 +1892,16 @@ MODULE pbo_0100 OUTPUT.
     PERFORM merge_audit_log USING p_tab CHANGING <fs_table>.
   ENDIF.
 
-  IF <fs_table> IS NOT ASSIGNED OR <fs_table> IS INITIAL.
-    MESSAGE 'Không có dữ liệu để hiển thị' TYPE 'I'.
-    LEAVE TO SCREEN 0.
-    RETURN.
-  ENDIF.
+IF <fs_table> IS NOT ASSIGNED.
+  MESSAGE 'Không thể gán dữ liệu ALV.' TYPE 'S' DISPLAY LIKE 'E'.
+  LEAVE TO SCREEN 0.
+  RETURN.
+ENDIF.
+
+" Nếu bảng rỗng thì vẫn cho hiển thị ALV (không LEAVE)
+IF <fs_table> IS INITIAL.
+  MESSAGE 'Không có dữ liệu để hiển thị, mở ALV trống.' TYPE 'S' DISPLAY LIKE 'I'.
+ENDIF.
 
   TRY.
       "=== Chuẩn bị Fieldcatalog ===
@@ -2045,7 +2077,7 @@ MODULE pai_0100 INPUT.
                 IMPORTING
                   answer                = lv_ans_exit.
 
-               CASE lv_ans_exit.
+              CASE lv_ans_exit.
                 WHEN '1'. " Lưu
                   PERFORM on_save.
 
@@ -2515,6 +2547,9 @@ FORM build_excluding_toolbar.
 
 ENDFORM.
 
+
+
+
 *=====================================================================*
 * INCLUDE ZFA25SAP23_IO - Đọc / Upload dữ liệu Excel (.XLSX, .XLS)
 *=====================================================================*
@@ -2753,7 +2788,7 @@ FORM upload_data_strict_match.
   PERFORM build_fieldcat_all.
   gt_key_fields = lt_keys_meta.
 
-lt_ddic_fields = lt_dfies.
+  lt_ddic_fields = lt_dfies.
 
   IF sy-subrc <> 0 OR lt_ddic_fields IS INITIAL.
     MESSAGE |Không lấy được metadata của bảng { p_tab }| TYPE 'S' DISPLAY LIKE 'E'.
@@ -2895,12 +2930,12 @@ lt_ddic_fields = lt_dfies.
 
       DATA(lv_val_excel) = ls_cell-value.
       "=== 🔧 Chuẩn hóa giá trị đặc biệt (ngày & giờ Excel trống hoặc 00000000) ===
-IF ls_ddic-inttype = 'D' AND ( lv_val_excel = '00000000' OR lv_val_excel = '0' ).
-  CLEAR lv_val_excel.
-ENDIF.
-IF ls_ddic-inttype = 'T' AND ( lv_val_excel = '000000' OR lv_val_excel = '0' ).
-  CLEAR lv_val_excel.
-ENDIF.
+      IF ls_ddic-inttype = 'D' AND ( lv_val_excel = '00000000' OR lv_val_excel = '0' ).
+        CLEAR lv_val_excel.
+      ENDIF.
+      IF ls_ddic-inttype = 'T' AND ( lv_val_excel = '000000' OR lv_val_excel = '0' ).
+        CLEAR lv_val_excel.
+      ENDIF.
       DATA(lv_type) = ls_ddic-inttype.
       DATA(lv_valid) = abap_true.
 
@@ -3018,6 +3053,8 @@ ENDIF.
       ENDTRY.
     ENDIF.
   ENDLOOP.
+
+
   "=== ✅ STEP 3: Merge dữ liệu Excel vào ALV hiện tại (preview) ===
   FIELD-SYMBOLS: <lt_alv> TYPE STANDARD TABLE.
   ASSIGN gr_data->* TO <lt_alv>.
@@ -3046,56 +3083,54 @@ ENDIF.
         IF lv_samekey = abap_true.
           " 🔹 So sánh xem có thay đổi không
           DATA(lv_changed) = abap_false.
-          DO.
-            ASSIGN COMPONENT sy-index OF STRUCTURE <ls_new> TO FIELD-SYMBOL(<v_n>).
-            ASSIGN COMPONENT sy-index OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<v_o>).
-            IF sy-subrc <> 0 OR <v_n> IS NOT ASSIGNED OR <v_o> IS NOT ASSIGNED.
-              EXIT.
-            ENDIF.
-            IF <v_n> <> <v_o>.
-              lv_changed = abap_true.
-              EXIT.
-            ENDIF.
-          ENDDO.
+          LOOP AT gt_fieldcat ASSIGNING FIELD-SYMBOL(<fc_chk>).
+    " Bỏ qua field kỹ thuật và audit
+    IF <fc_chk>-tech = abap_true OR <fc_chk>-no_out = abap_true.
+      CONTINUE.
+    ENDIF.
+    IF <fc_chk>-fieldname CP 'ER*' OR <fc_chk>-fieldname CP 'AE*' OR <fc_chk>-fieldname CP 'IS_*'.
+      CONTINUE.
+    ENDIF.
 
-*          IF lv_changed = abap_true.
-*            MOVE-CORRESPONDING <ls_new> TO <ls_old>.
-*
-*            " Gắn cờ UPDATE
-*            ASSIGN COMPONENT 'IS_CHANGED' OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<flag_upd>).
-*            IF sy-subrc = 0. <flag_upd> = 'X'. ENDIF.
-*
-*            " Audit changed
-*            ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<aedat>).
-*            ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<aetim>).
-*            ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<aenam>).
-*            IF <aedat> IS ASSIGNED. <aedat> = sy-datum. ENDIF.
-*            IF <aetim> IS ASSIGNED. <aetim> = sy-uzeit. ENDIF.
-*            IF <aenam> IS ASSIGNED. <aenam> = sy-uname. ENDIF.
-*
-*            lv_updated += 1.
-*          ENDIF.
+    ASSIGN COMPONENT <fc_chk>-fieldname OF STRUCTURE <ls_new> TO FIELD-SYMBOL(<v_n>).
+    ASSIGN COMPONENT <fc_chk>-fieldname OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<v_o>).
+
+    IF <v_n> IS ASSIGNED AND <v_o> IS ASSIGNED AND <v_n> <> <v_o>.
+      lv_changed = abap_true.
+      EXIT.
+    ENDIF.
+  ENDLOOP.
+*          DO.
+*            ASSIGN COMPONENT sy-index OF STRUCTURE <ls_new> TO FIELD-SYMBOL(<v_n>).
+*            ASSIGN COMPONENT sy-index OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<v_o>).
+*            IF sy-subrc <> 0 OR <v_n> IS NOT ASSIGNED OR <v_o> IS NOT ASSIGNED.
+*              EXIT.
+*            ENDIF.
+*            IF <v_n> <> <v_o>.
+*              lv_changed = abap_true.
+*              EXIT.
+*            ENDIF.
+*          ENDDO.
           IF lv_changed = abap_true.
-*  MOVE-CORRESPONDING <ls_new> TO <ls_old>.
             " Chỉ copy field thường, giữ nguyên 3 field create
-LOOP AT gt_fieldcat ASSIGNING FIELD-SYMBOL(<fc_upd>).
-  IF <fc_upd>-fieldname CP 'ER*' OR <fc_upd>-fieldname = 'MANDT'.
-    CONTINUE. " Không copy ERDAT/ERNAM/ERTIM, giữ nguyên
-  ENDIF.
-  ASSIGN COMPONENT <fc_upd>-fieldname OF STRUCTURE <ls_new> TO FIELD-SYMBOL(<v_new2>).
-  ASSIGN COMPONENT <fc_upd>-fieldname OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<v_old2>).
-  IF <v_new2> IS ASSIGNED AND <v_old2> IS ASSIGNED.
-    <v_old2> = <v_new2>.
-  ENDIF.
-ENDLOOP.
+            LOOP AT gt_fieldcat ASSIGNING FIELD-SYMBOL(<fc_upd>).
+              IF <fc_upd>-fieldname CP 'ER*' OR <fc_upd>-fieldname = 'MANDT'.
+                CONTINUE. " Không copy ERDAT/ERNAM/ERTIM, giữ nguyên
+              ENDIF.
+              ASSIGN COMPONENT <fc_upd>-fieldname OF STRUCTURE <ls_new> TO FIELD-SYMBOL(<v_new2>).
+              ASSIGN COMPONENT <fc_upd>-fieldname OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<v_old2>).
+              IF <v_new2> IS ASSIGNED AND <v_old2> IS ASSIGNED.
+                <v_old2> = <v_new2>.
+              ENDIF.
+            ENDLOOP.
 
 
-  " ✅ Chỉ đánh dấu IS_CHANGED, không update 3 field audit ở bước preview
-  ASSIGN COMPONENT 'IS_CHANGED' OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<flag_upd>).
-  IF sy-subrc = 0. <flag_upd> = 'X'. ENDIF.
+            " ✅ Chỉ đánh dấu IS_CHANGED, không update 3 field audit ở bước preview
+            ASSIGN COMPONENT 'IS_CHANGED' OF STRUCTURE <ls_old> TO FIELD-SYMBOL(<flag_upd>).
+            IF sy-subrc = 0. <flag_upd> = 'X'. ENDIF.
 
-  lv_updated += 1.
-ENDIF.
+            lv_updated += 1.
+          ENDIF.
 
           lv_found = abap_true.
           EXIT.
@@ -3244,43 +3279,106 @@ ENDIF.
       MESSAGE 'Lỗi khi hiển thị popup lỗi' TYPE 'E'.
     ENDIF.
   ENDIF.
-  "=== 7) Set flag NEWREC chỉ cho dòng chưa tồn tại trong DB ===
-  LOOP AT <lt_data> ASSIGNING <ls_data>.
-    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_data> TO <newrec>.
-    IF sy-subrc = 0.
-      CLEAR <newrec>. " mặc định là đã có trong DB
-    ENDIF.
 
-    " Kiểm tra khóa chính có tồn tại trong DB không
-    DATA(lv_where2) = VALUE string( ).
-    LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld2>).
-      ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<valkey2>).
-      IF <valkey2> IS ASSIGNED.
-        IF lv_where2 IS INITIAL.
-          lv_where2 = |{ <keyfld2> } = '{ <valkey2> }'|.
-        ELSE.
-          lv_where2 = |{ lv_where2 } AND { <keyfld2> } = '{ <valkey2> }'|.
-        ENDIF.
+
+
+*  "=== 7) Set flag NEWREC chỉ cho dòng chưa tồn tại trong DB ===
+*  LOOP AT <lt_data> ASSIGNING <ls_data>.
+*    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_data> TO <newrec>.
+*    IF sy-subrc = 0.
+*      CLEAR <newrec>. " mặc định là đã có trong DB
+*    ENDIF.
+*
+*    " Kiểm tra khóa chính có tồn tại trong DB không
+*    DATA(lv_where2) = VALUE string( ).
+*    LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld2>).
+*      ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<valkey2>).
+*      IF <valkey2> IS ASSIGNED.
+*        IF lv_where2 IS INITIAL.
+*          lv_where2 = |{ <keyfld2> } = '{ <valkey2> }'|.
+*        ELSE.
+*          lv_where2 = |{ lv_where2 } AND { <keyfld2> } = '{ <valkey2> }'|.
+*        ENDIF.
+*      ENDIF.
+*    ENDLOOP.
+*    DATA(dummy_mandt) = ''.
+*
+*    TRY.
+*        EXEC SQL.
+*          SELECT mandt INTO :dummy_mandt
+*          FROM (p_tab)
+*          WHERE (lv_where2)
+*        ENDEXEC.
+*      CATCH cx_sy_native_sql_error INTO DATA(lx_sql).
+*        dummy_mandt = ''.
+*    ENDTRY.
+*
+*
+*
+*    IF sy-subrc <> 0 AND <newrec> IS ASSIGNED.
+*      <newrec> = 'X'. " chỉ dòng mới
+*    ENDIF.
+*  ENDLOOP.
+"=== 7) Xác định lại dòng INSERT / UPDATE (chuẩn với logic SAVE) ===
+PERFORM ensure_keys USING p_tab.
+
+LOOP AT <lt_data> ASSIGNING <ls_data>.
+  ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_data> TO <newrec>.
+  IF sy-subrc = 0.
+    CLEAR <newrec>.
+  ENDIF.
+
+  " Xây điều kiện WHERE theo key
+  DATA(lv_where2) = VALUE string( ).
+  LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld2>).
+    ASSIGN COMPONENT <keyfld2> OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<valkey2>).
+    IF <valkey2> IS ASSIGNED.
+      DATA(lv_val2) = |{ <valkey2> }|.
+      CONDENSE lv_val2 NO-GAPS.
+      IF lv_where2 IS INITIAL.
+        lv_where2 = |{ <keyfld2> } = '{ lv_val2 }'|.
+      ELSE.
+        lv_where2 = |{ lv_where2 } AND { <keyfld2> } = '{ lv_val2 }'|.
       ENDIF.
-    ENDLOOP.
-DATA(dummy_mandt) = ''.
-
-TRY.
-    EXEC SQL.
-      SELECT mandt INTO :dummy_mandt
-      FROM (p_tab)
-      WHERE (lv_where2)
-    ENDEXEC.
-  CATCH cx_sy_native_sql_error INTO DATA(lx_sql).
-    dummy_mandt = ''.
-ENDTRY.
-
-
-
-    IF sy-subrc <> 0 AND <newrec> IS ASSIGNED.
-      <newrec> = 'X'. " chỉ dòng mới
     ENDIF.
   ENDLOOP.
+
+  IF lv_where2 IS INITIAL.
+    CONTINUE.
+  ENDIF.
+
+  " Kiểm tra tồn tại trong DB
+DATA lv_dummy TYPE i.
+
+TRY.
+    SELECT SINGLE COUNT(*)
+      FROM (p_tab)
+      WHERE (lv_where2)
+      INTO @lv_dummy.
+  CATCH cx_sy_dynamic_osql_semantics INTO DATA(lx_sem).
+    MESSAGE lx_sem->get_text( ) TYPE 'I'.
+    CONTINUE.
+ENDTRY.
+  IF sy-subrc <> 0 AND <newrec> IS ASSIGNED.
+    <newrec> = 'X'. " dòng mới
+  ENDIF.
+ENDLOOP.
+"=== Chuẩn hóa key NUMC để không mất leading zero ===
+LOOP AT <lt_data> ASSIGNING <ls_data>.
+  LOOP AT gt_key_fields ASSIGNING FIELD-SYMBOL(<keyfld3>).
+    READ TABLE lt_ddic_fields INTO DATA(ls_meta3) WITH KEY fieldname = <keyfld3>.
+    IF sy-subrc = 0 AND ls_meta3-inttype = 'N'.
+      ASSIGN COMPONENT <keyfld3> OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<val3>).
+      IF <val3> IS ASSIGNED.
+        DATA(lv_norm3) = condense( |{ <val3> }| ).
+        CALL FUNCTION 'CONVERSION_EXIT_ALPHA_INPUT'
+          EXPORTING input  = lv_norm3
+          IMPORTING output = lv_norm3.
+        <val3> = lv_norm3.
+      ENDIF.
+    ENDIF.
+  ENDLOOP.
+ENDLOOP.
 
   "=== 7c) Cập nhật logic insert/update cho 6 field audit ===
   DATA: lv_tabname TYPE tabname,
@@ -3306,6 +3404,27 @@ ENDTRY.
   ASSIGN gr_data->* TO <lt_alv>.
 
   LOOP AT <lt_alv> ASSIGNING <ls_data>.
+      ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_newrec_flag>).
+  IF <lv_newrec_flag> IS ASSIGNED AND <lv_newrec_flag> = 'X'.
+    lv_new_count += 1.
+
+    ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_erdat>).
+    ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ertim>).
+    ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ernam>).
+    IF <lv_erdat> IS ASSIGNED. <lv_erdat> = lv_date. ENDIF.
+    IF <lv_ertim> IS ASSIGNED. <lv_ertim> = lv_time. ENDIF.
+    IF <lv_ernam> IS ASSIGNED. <lv_ernam> = lv_user. ENDIF.
+
+    " Clear Changed*
+    ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat_i>).
+    ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim_i>).
+    ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam_i>).
+    IF <lv_aedat_i> IS ASSIGNED. CLEAR <lv_aedat_i>. ENDIF.
+    IF <lv_aetim_i> IS ASSIGNED. CLEAR <lv_aetim_i>. ENDIF.
+    IF <lv_aenam_i> IS ASSIGNED. CLEAR <lv_aenam_i>. ENDIF.
+
+    CONTINUE. " ⬅️ rất quan trọng
+  ENDIF.
     FIELD-SYMBOLS: <val_old> TYPE any,
                    <val_new> TYPE any.
 
@@ -3328,152 +3447,95 @@ ENDTRY.
     CREATE DATA lr_db TYPE HANDLE lo_struct.
     ASSIGN lr_db->* TO FIELD-SYMBOL(<ls_db>).
 
-*    SELECT SINGLE * FROM (lv_tabname) INTO @<ls_db> WHERE (lv_where).
-*IF sy-subrc = 0.
-*  " 🔹 Record đã tồn tại trong DB → kiểm tra thay đổi thật (bỏ qua AE* / ER*)
-*  CLEAR lv_changed.
-*
-*  LOOP AT lt_ddic_fields INTO DATA(ls_field).
-*    IF ls_field-fieldname = 'MANDT'
-*       OR ls_field-fieldname CP 'AE*'
-*       OR ls_field-fieldname CP 'ER*'.
-*      CONTINUE.
-*    ENDIF.
-*
-*    ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
-*    ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db>  TO <val_old>.
-*    IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
-*      IF |{ <val_new> }| <> |{ <val_old> }|.
-*        lv_changed = abap_true.
-*        EXIT.
-*      ENDIF.
-*    ENDIF.
-*  ENDLOOP.
-*
-*  IF lv_changed = abap_true.
-*    lv_changed_count += 1.
-*    ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat>).
-*    ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim>).
-*    ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam>).
-*    IF <lv_aedat> IS ASSIGNED. <lv_aedat> = lv_date. ENDIF.
-*    IF <lv_aetim> IS ASSIGNED. <lv_aetim> = lv_time. ENDIF.
-*    IF <lv_aenam> IS ASSIGNED. <lv_aenam> = lv_user. ENDIF.
-*  ENDIF.
-*
-*ELSE.
-*  " 🔹 Record mới → set Create*, clear Change*
-*  lv_new_count += 1.
-*  ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_erdat>).
-*  ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ertim>).
-*  ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ernam>).
-*  IF <lv_erdat> IS ASSIGNED. <lv_erdat> = lv_date. ENDIF.
-*  IF <lv_ertim> IS ASSIGNED. <lv_ertim> = lv_time. ENDIF.
-*  IF <lv_ernam> IS ASSIGNED. <lv_ernam> = lv_user. ENDIF.
-*
-*  ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat_i>).
-*  ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim_i>).
-*  ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam_i>).
-*  IF <lv_aedat_i> IS ASSIGNED. CLEAR <lv_aedat_i>. ENDIF.
-*  IF <lv_aetim_i> IS ASSIGNED. CLEAR <lv_aetim_i>. ENDIF.
-*  IF <lv_aenam_i> IS ASSIGNED. CLEAR <lv_aenam_i>. ENDIF.
-*ENDIF.
-DATA: lo_sql    TYPE REF TO cl_sql_statement,
-      lo_result TYPE REF TO cl_sql_result_set,
-      lx_sql2   TYPE REF TO cx_sql_exception.
+    DATA: lo_sql    TYPE REF TO cl_sql_statement,
+          lo_result TYPE REF TO cl_sql_result_set,
+          lx_sql2   TYPE REF TO cx_sql_exception.
 
-DATA(lv_sql) = |SELECT * FROM { lv_tabname } WHERE { lv_where }|.
+    DATA(lv_sql) = |SELECT * FROM { lv_tabname } WHERE { lv_where }|.
 
-CREATE OBJECT lo_sql.
+    CREATE OBJECT lo_sql.
 
-TRY.
-    lo_result = lo_sql->execute_query( lv_sql ).
-    lo_result->set_param_struct( REF #( <ls_db> ) ).
-    lo_result->next( ).
-  CATCH cx_sql_exception INTO lx_sql2.
-    CLEAR <ls_db>.
-ENDTRY.
+    TRY.
+        lo_result = lo_sql->execute_query( lv_sql ).
+        lo_result->set_param_struct( REF #( <ls_db> ) ).
+        lo_result->next( ).
+      CATCH cx_sql_exception INTO lx_sql2.
+        CLEAR <ls_db>.
+    ENDTRY.
 
 
-IF <ls_db> IS ASSIGNED AND <ls_db> IS NOT INITIAL.
-  CLEAR lv_changed.
+    IF <ls_db> IS ASSIGNED AND <ls_db> IS NOT INITIAL.
+      CLEAR lv_changed.
 
-  LOOP AT lt_ddic_fields INTO DATA(ls_field).
-    IF ls_field-fieldname CP 'MANDT' OR
-       ls_field-fieldname CP 'AE*' OR
-       ls_field-fieldname CP 'ER*'.
-      CONTINUE.
-    ENDIF.
-    ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
-    ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db>  TO <val_old>.
-*    IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
-*      IF |{ <val_new> }| <> |{ <val_old> }|.
-*        lv_changed = abap_true.
-*        EXIT.
-*      ENDIF.
-*    ENDIF.
-    IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
+      LOOP AT lt_ddic_fields INTO DATA(ls_field).
+        IF ls_field-fieldname CP 'MANDT' OR
+           ls_field-fieldname CP 'AE*' OR
+           ls_field-fieldname CP 'ER*'.
+          CONTINUE.
+        ENDIF.
+        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_data> TO <val_new>.
+        ASSIGN COMPONENT ls_field-fieldname OF STRUCTURE <ls_db>  TO <val_old>.
+        IF <val_new> IS ASSIGNED AND <val_old> IS ASSIGNED.
 
-  "=== Normalize giá trị theo kiểu dữ liệu
-  READ TABLE lt_ddic_fields INTO DATA(ls_type) WITH KEY fieldname = ls_field-fieldname.
-  IF sy-subrc = 0.
-    DATA(lv_old_str) = |{ <val_old> }|.
-    DATA(lv_new_str) = |{ <val_new> }|.
+          "=== Normalize giá trị theo kiểu dữ liệu
+          READ TABLE lt_ddic_fields INTO DATA(ls_type) WITH KEY fieldname = ls_field-fieldname.
+          IF sy-subrc = 0.
+            DATA(lv_old_str) = |{ <val_old> }|.
+            DATA(lv_new_str) = |{ <val_new> }|.
 
-    CASE ls_type-inttype.
-      WHEN 'N'.  " NUMC
-        SHIFT lv_old_str LEFT DELETING LEADING '0'.
-        SHIFT lv_new_str LEFT DELETING LEADING '0'.
-      WHEN 'I' OR 'P' OR 'F' OR 'CURR' OR 'QUAN'.
-        CONDENSE lv_old_str NO-GAPS.
-        CONDENSE lv_new_str NO-GAPS.
-      WHEN 'D'. " Date
-        IF lv_old_str = '00000000'. CLEAR lv_old_str. ENDIF.
-        IF lv_new_str = '00000000'. CLEAR lv_new_str. ENDIF.
-      WHEN 'T'. " Time
-        IF lv_old_str = '000000'. CLEAR lv_old_str. ENDIF.
-        IF lv_new_str = '000000'. CLEAR lv_new_str. ENDIF.
-      WHEN OTHERS.
-        " Giữ nguyên
-    ENDCASE.
+            CASE ls_type-inttype.
+              WHEN 'N'.  " NUMC
+                SHIFT lv_old_str LEFT DELETING LEADING '0'.
+                SHIFT lv_new_str LEFT DELETING LEADING '0'.
+              WHEN 'I' OR 'P' OR 'F' OR 'CURR' OR 'QUAN'.
+                CONDENSE lv_old_str NO-GAPS.
+                CONDENSE lv_new_str NO-GAPS.
+              WHEN 'D'. " Date
+                IF lv_old_str = '00000000'. CLEAR lv_old_str. ENDIF.
+                IF lv_new_str = '00000000'. CLEAR lv_new_str. ENDIF.
+              WHEN 'T'. " Time
+                IF lv_old_str = '000000'. CLEAR lv_old_str. ENDIF.
+                IF lv_new_str = '000000'. CLEAR lv_new_str. ENDIF.
+              WHEN OTHERS.
+                " Giữ nguyên
+            ENDCASE.
 
-    IF lv_old_str <> lv_new_str.
-      lv_changed = abap_true.
-      EXIT.
-    ENDIF.
+            IF lv_old_str <> lv_new_str.
+              lv_changed = abap_true.
+              EXIT.
+            ENDIF.
+          ENDIF.
+
+        ENDIF.
+
+      ENDLOOP.
+
+      IF lv_changed = abap_true.
+        lv_changed_count += 1.
+        ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat>).
+        ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim>).
+        ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam>).
+        IF <lv_aedat> IS ASSIGNED. <lv_aedat> = lv_date. ENDIF.
+        IF <lv_aetim> IS ASSIGNED. <lv_aetim> = lv_time. ENDIF.
+        IF <lv_aenam> IS ASSIGNED. <lv_aenam> = lv_user. ENDIF.
+      ENDIF.
+
+  ELSE.
+    lv_new_count += 1.
+    ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_erdat_i>).
+    ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ertim_i>).
+    ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ernam_i>).
+    IF <lv_erdat_i> IS ASSIGNED. <lv_erdat_i> = lv_date. ENDIF.
+    IF <lv_ertim_i> IS ASSIGNED. <lv_ertim_i> = lv_time. ENDIF.
+    IF <lv_ernam_i> IS ASSIGNED. <lv_ernam_i> = lv_user. ENDIF.
+
+    ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat_new>).
+    ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim_new>).
+    ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam_new>).
+    IF <lv_aedat_new> IS ASSIGNED. CLEAR <lv_aedat_new>. ENDIF.
+    IF <lv_aetim_new> IS ASSIGNED. CLEAR <lv_aetim_new>. ENDIF.
+    IF <lv_aenam_new> IS ASSIGNED. CLEAR <lv_aenam_new>. ENDIF.
   ENDIF.
-
-ENDIF.
-
-  ENDLOOP.
-
-  IF lv_changed = abap_true.
-    lv_changed_count += 1.
-    ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat>).
-    ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim>).
-    ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam>).
-    IF <lv_aedat> IS ASSIGNED. <lv_aedat> = lv_date. ENDIF.
-    IF <lv_aetim> IS ASSIGNED. <lv_aetim> = lv_time. ENDIF.
-    IF <lv_aenam> IS ASSIGNED. <lv_aenam> = lv_user. ENDIF.
-  ENDIF.
-
-ELSE.
-  " 🔹 Record mới (không tồn tại trong DB)
-  lv_new_count += 1.
-  ASSIGN COMPONENT 'ERDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_erdat>).
-  ASSIGN COMPONENT 'ERTIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ertim>).
-  ASSIGN COMPONENT 'ERNAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_ernam>).
-  IF <lv_erdat> IS ASSIGNED. <lv_erdat> = lv_date. ENDIF.
-  IF <lv_ertim> IS ASSIGNED. <lv_ertim> = lv_time. ENDIF.
-  IF <lv_ernam> IS ASSIGNED. <lv_ernam> = lv_user. ENDIF.
-
-  " Clear Changed*
-  ASSIGN COMPONENT 'AEDAT' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aedat_i>).
-  ASSIGN COMPONENT 'AETIM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aetim_i>).
-  ASSIGN COMPONENT 'AENAM' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_aenam_i>).
-  IF <lv_aedat_i> IS ASSIGNED. CLEAR <lv_aedat_i>. ENDIF.
-  IF <lv_aetim_i> IS ASSIGNED. CLEAR <lv_aetim_i>. ENDIF.
-  IF <lv_aenam_i> IS ASSIGNED. CLEAR <lv_aenam_i>. ENDIF.
-ENDIF.
 
 
 
@@ -3484,8 +3546,6 @@ ENDIF.
     MESSAGE 'Không có dữ liệu hợp lệ sau upload!' TYPE 'S' DISPLAY LIKE 'E'.
     RETURN.
   ENDIF.
-*  DESCRIBE TABLE <lt_data> LINES lv_count.
-*  MESSAGE |Đã upload { lv_count } dòng dữ liệu tạm thời. Vui lòng kiểm tra trước khi bấm SAVE.| TYPE 'S'.
   DATA(lv_total_changed) = lv_new_count + lv_changed_count.
 
   IF lv_total_changed > 0.
@@ -3493,24 +3553,66 @@ ENDIF.
   ELSE.
     MESSAGE 'Không có thay đổi dữ liệu mới trong upload này.' TYPE 'I'.
   ENDIF.
+*-----------------------------------------------------------------------
+* 🔹 Reorder 6 field thủ công xuống cuối ALV (bản đảm bảo)
+*-----------------------------------------------------------------------
+PERFORM build_fieldcat_all.
 
+DATA: lt_audit_fields TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
+      lt_other_fields TYPE STANDARD TABLE OF string,
+      lt_final_fields TYPE STANDARD TABLE OF string.
 
+" Danh sách 6 field thủ công chuẩn
+APPEND 'ERDAT' TO lt_audit_fields.
+APPEND 'ERTIM' TO lt_audit_fields.
+APPEND 'ERNAM' TO lt_audit_fields.
+APPEND 'AEDAT' TO lt_audit_fields.
+APPEND 'AETIM' TO lt_audit_fields.
+APPEND 'AENAM' TO lt_audit_fields.
 
-
-  "-----------------------------------------------------------
-  " 🔹 [11] Refresh lại ALV sau upload
-  "-----------------------------------------------------------
-  IF g_alv_grid IS BOUND.
-    TRY.
-        g_alv_grid->refresh_table_display( EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-        g_alv_grid->set_toolbar_interactive( ).
-      CATCH cx_root INTO DATA(lx_err).
-        MESSAGE lx_err->get_text( ) TYPE 'S' DISPLAY LIKE 'E'.
-    ENDTRY.
+" Tách field thường và field audit
+LOOP AT gt_fieldcat ASSIGNING FIELD-SYMBOL(<fs_fc>).
+  DATA(lv_name) = <fs_fc>-fieldname.
+  READ TABLE lt_audit_fields WITH KEY table_line = lv_name TRANSPORTING NO FIELDS.
+  IF sy-subrc = 0.
+    CONTINUE. " sẽ append sau
+  ELSE.
+    APPEND lv_name TO lt_other_fields.
   ENDIF.
-  PERFORM apply_editability_and_push.
-  gv_in_upload = abap_false.
+ENDLOOP.
+
+" Gộp lại: thường trước, audit sau
+APPEND LINES OF lt_audit_fields TO lt_other_fields.
+lt_final_fields = lt_other_fields.
+
+" Cập nhật lại col_pos theo thứ tự chuẩn
+DATA(lv_pos) = 1.
+LOOP AT lt_final_fields INTO DATA(lv_field).
+  READ TABLE gt_fieldcat ASSIGNING <fs_fc> WITH KEY fieldname = lv_field.
+  IF sy-subrc = 0.
+    <fs_fc>-col_pos = lv_pos.
+    lv_pos += 1.
+  ENDIF.
+ENDLOOP.
+
+"=========================================================
+" 🔹 Cập nhật ALV hiển thị theo fieldcatalog mới
+"=========================================================
+IF g_alv_grid IS BOUND.
+  TRY.
+      g_alv_grid->set_frontend_fieldcatalog( gt_fieldcat ).
+      g_alv_grid->refresh_table_display(
+        EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+      g_alv_grid->set_toolbar_interactive( ).
+    CATCH cx_root INTO DATA(lx_err).
+      MESSAGE lx_err->get_text( ) TYPE 'S' DISPLAY LIKE 'E'.
+  ENDTRY.
+ENDIF.
+
+PERFORM apply_editability_and_push.
+gv_in_upload = abap_false.
 ENDFORM.
+
 
 
 FORM download_excel_xlsx USING ir_data TYPE REF TO data.
@@ -3605,46 +3707,46 @@ FORM download_excel_xlsx USING ir_data TYPE REF TO data.
 
     lr_data_no_style = lr_filtered.
   ENDIF.
-"=== Nếu bảng có 6 field thủ công thì đẩy chúng xuống cuối ===
-DATA: lt_audit_order TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
-      lt_keep        TYPE STANDARD TABLE OF string,
-      lt_remove      TYPE STANDARD TABLE OF string,
-      lt_ddic        TYPE TABLE OF dfies,
-      ls_ddic        TYPE dfies.
+  "=== Nếu bảng có 6 field thủ công thì đẩy chúng xuống cuối ===
+  DATA: lt_audit_order TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
+        lt_keep        TYPE STANDARD TABLE OF string,
+        lt_remove      TYPE STANDARD TABLE OF string,
+        lt_ddic        TYPE TABLE OF dfies,
+        ls_ddic        TYPE dfies.
 
-APPEND 'ERDAT' TO lt_audit_order.
-APPEND 'ERTIM' TO lt_audit_order.
-APPEND 'ERNAM' TO lt_audit_order.
-APPEND 'AEDAT' TO lt_audit_order.
-APPEND 'AETIM' TO lt_audit_order.
-APPEND 'AENAM' TO lt_audit_order.
+  APPEND 'ERDAT' TO lt_audit_order.
+  APPEND 'ERTIM' TO lt_audit_order.
+  APPEND 'ERNAM' TO lt_audit_order.
+  APPEND 'AEDAT' TO lt_audit_order.
+  APPEND 'AETIM' TO lt_audit_order.
+  APPEND 'AENAM' TO lt_audit_order.
 
-CALL FUNCTION 'DDIF_FIELDINFO_GET'
-  EXPORTING
-    tabname   = p_tab
-  TABLES
-    dfies_tab = lt_ddic
-  EXCEPTIONS
-    OTHERS    = 1.
+  CALL FUNCTION 'DDIF_FIELDINFO_GET'
+    EXPORTING
+      tabname   = p_tab
+    TABLES
+      dfies_tab = lt_ddic
+    EXCEPTIONS
+      OTHERS    = 1.
 
-DATA: lt_normal TYPE STANDARD TABLE OF string,
-      lt_audit  TYPE STANDARD TABLE OF string.
+  DATA: lt_normal TYPE STANDARD TABLE OF string,
+        lt_audit  TYPE STANDARD TABLE OF string.
 
-LOOP AT lt_ddic INTO ls_ddic WHERE fieldname <> 'MANDT'.
-  READ TABLE lt_audit_order WITH KEY table_line = ls_ddic-fieldname TRANSPORTING NO FIELDS.
-  IF sy-subrc = 0.
-    APPEND ls_ddic-fieldname TO lt_audit.
-  ELSE.
-    APPEND ls_ddic-fieldname TO lt_normal.
+  LOOP AT lt_ddic INTO ls_ddic WHERE fieldname <> 'MANDT'.
+    READ TABLE lt_audit_order WITH KEY table_line = ls_ddic-fieldname TRANSPORTING NO FIELDS.
+    IF sy-subrc = 0.
+      APPEND ls_ddic-fieldname TO lt_audit.
+    ELSE.
+      APPEND ls_ddic-fieldname TO lt_normal.
+    ENDIF.
+  ENDLOOP.
+
+  IF lt_audit IS NOT INITIAL.
+    DATA lt_order TYPE STANDARD TABLE OF string WITH DEFAULT KEY.
+    APPEND LINES OF lt_normal TO lt_order.
+    APPEND LINES OF lt_audit  TO lt_order.
+    PERFORM reorder_components_ref USING lr_data_no_style lt_order.
   ENDIF.
-ENDLOOP.
-
-IF lt_audit IS NOT INITIAL.
-  DATA lt_order TYPE STANDARD TABLE OF string WITH DEFAULT KEY.
-  APPEND LINES OF lt_normal TO lt_order.
-  APPEND LINES OF lt_audit  TO lt_order.
-  PERFORM reorder_components_ref USING lr_data_no_style lt_order.
-ENDIF.
 
   " 3) Xuất Excel
   TRY.
@@ -3719,79 +3821,79 @@ FORM download_template_xlsx.
   PERFORM create_dynamic_itab USING p_tab
     CHANGING lr_template.
 
-"=== 2B) Loại bỏ 6 field thủ công nếu không có trong DDIC ===
-DATA: lt_ddic   TYPE TABLE OF dfies,
-      lt_keep   TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
-      lt_remove TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
-      ls_ddic   TYPE dfies.
+  "=== 2B) Loại bỏ 6 field thủ công nếu không có trong DDIC ===
+  DATA: lt_ddic   TYPE TABLE OF dfies,
+        lt_keep   TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
+        lt_remove TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
+        ls_ddic   TYPE dfies.
 
-CALL FUNCTION 'DDIF_FIELDINFO_GET'
-  EXPORTING
-    tabname   = p_tab
-  TABLES
-    dfies_tab = lt_ddic
-  EXCEPTIONS
-    OTHERS    = 1.
+  CALL FUNCTION 'DDIF_FIELDINFO_GET'
+    EXPORTING
+      tabname   = p_tab
+    TABLES
+      dfies_tab = lt_ddic
+    EXCEPTIONS
+      OTHERS    = 1.
 
-LOOP AT lt_ddic INTO ls_ddic WHERE fieldname <> 'MANDT'.
-  APPEND ls_ddic-fieldname TO lt_keep.
-ENDLOOP.
-
-" --- Tạo danh sách audit WITHOUT VALUE constructor ---
-DATA lt_audit TYPE STANDARD TABLE OF string WITH DEFAULT KEY.
-APPEND 'ERDAT' TO lt_audit.
-APPEND 'ERTIM' TO lt_audit.
-APPEND 'ERNAM' TO lt_audit.
-APPEND 'AEDAT' TO lt_audit.
-APPEND 'AETIM' TO lt_audit.
-APPEND 'AENAM' TO lt_audit.
-
-" --- Nếu field audit KHÔNG có trong DDIC thì đưa vào lt_remove ---
-DATA lv_field TYPE string.
-LOOP AT lt_audit INTO lv_field.
-  " Kiểm tra membership theo kiểu classic
-  READ TABLE lt_keep WITH KEY table_line = lv_field TRANSPORTING NO FIELDS.
-  IF sy-subrc <> 0.
-    APPEND lv_field TO lt_remove.
-  ENDIF.
-ENDLOOP.
-
-IF lt_remove IS NOT INITIAL.
-  PERFORM remove_components_from_ref USING lr_template lt_remove.
-  ENDIF.
-"=== Nếu bảng có các field audit thì đẩy chúng xuống cuối ===
-DATA: lt_audit_order TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
-      lt_keep_order  TYPE STANDARD TABLE OF dfies,
-      lt_normal      TYPE TABLE OF dfies,
-      lt_audit2      TYPE TABLE OF dfies.  " ⬅️ đổi tên khác
-
-APPEND 'ERDAT' TO lt_audit_order.
-APPEND 'ERTIM' TO lt_audit_order.
-APPEND 'ERNAM' TO lt_audit_order.
-APPEND 'AEDAT' TO lt_audit_order.
-APPEND 'AETIM' TO lt_audit_order.
-APPEND 'AENAM' TO lt_audit_order.
-
-LOOP AT lt_ddic INTO ls_ddic WHERE fieldname <> 'MANDT'.
-  READ TABLE lt_audit_order WITH KEY table_line = ls_ddic-fieldname TRANSPORTING NO FIELDS.
-  IF sy-subrc = 0.
-    APPEND ls_ddic TO lt_audit2.
-  ELSE.
-    APPEND ls_ddic TO lt_normal.
-  ENDIF.
-ENDLOOP.
-
-IF lt_audit2 IS NOT INITIAL.
-  " Reorder cấu trúc template: normal trước, audit sau
-  DATA: lt_order TYPE STANDARD TABLE OF string WITH DEFAULT KEY.
-  LOOP AT lt_normal INTO ls_ddic.
-    APPEND ls_ddic-fieldname TO lt_order.
+  LOOP AT lt_ddic INTO ls_ddic WHERE fieldname <> 'MANDT'.
+    APPEND ls_ddic-fieldname TO lt_keep.
   ENDLOOP.
-  LOOP AT lt_audit2 INTO ls_ddic.
-    APPEND ls_ddic-fieldname TO lt_order.
+
+  " --- Tạo danh sách audit WITHOUT VALUE constructor ---
+  DATA lt_audit TYPE STANDARD TABLE OF string WITH DEFAULT KEY.
+  APPEND 'ERDAT' TO lt_audit.
+  APPEND 'ERTIM' TO lt_audit.
+  APPEND 'ERNAM' TO lt_audit.
+  APPEND 'AEDAT' TO lt_audit.
+  APPEND 'AETIM' TO lt_audit.
+  APPEND 'AENAM' TO lt_audit.
+
+  " --- Nếu field audit KHÔNG có trong DDIC thì đưa vào lt_remove ---
+  DATA lv_field TYPE string.
+  LOOP AT lt_audit INTO lv_field.
+    " Kiểm tra membership theo kiểu classic
+    READ TABLE lt_keep WITH KEY table_line = lv_field TRANSPORTING NO FIELDS.
+    IF sy-subrc <> 0.
+      APPEND lv_field TO lt_remove.
+    ENDIF.
   ENDLOOP.
-  PERFORM reorder_components_ref USING lr_template lt_order.
-ENDIF.
+
+  IF lt_remove IS NOT INITIAL.
+    PERFORM remove_components_from_ref USING lr_template lt_remove.
+  ENDIF.
+  "=== Nếu bảng có các field audit thì đẩy chúng xuống cuối ===
+  DATA: lt_audit_order TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
+        lt_keep_order  TYPE STANDARD TABLE OF dfies,
+        lt_normal      TYPE TABLE OF dfies,
+        lt_audit2      TYPE TABLE OF dfies.  " ⬅️ đổi tên khác
+
+  APPEND 'ERDAT' TO lt_audit_order.
+  APPEND 'ERTIM' TO lt_audit_order.
+  APPEND 'ERNAM' TO lt_audit_order.
+  APPEND 'AEDAT' TO lt_audit_order.
+  APPEND 'AETIM' TO lt_audit_order.
+  APPEND 'AENAM' TO lt_audit_order.
+
+  LOOP AT lt_ddic INTO ls_ddic WHERE fieldname <> 'MANDT'.
+    READ TABLE lt_audit_order WITH KEY table_line = ls_ddic-fieldname TRANSPORTING NO FIELDS.
+    IF sy-subrc = 0.
+      APPEND ls_ddic TO lt_audit2.
+    ELSE.
+      APPEND ls_ddic TO lt_normal.
+    ENDIF.
+  ENDLOOP.
+
+  IF lt_audit2 IS NOT INITIAL.
+    " Reorder cấu trúc template: normal trước, audit sau
+    DATA: lt_order TYPE STANDARD TABLE OF string WITH DEFAULT KEY.
+    LOOP AT lt_normal INTO ls_ddic.
+      APPEND ls_ddic-fieldname TO lt_order.
+    ENDLOOP.
+    LOOP AT lt_audit2 INTO ls_ddic.
+      APPEND ls_ddic-fieldname TO lt_order.
+    ENDLOOP.
+    PERFORM reorder_components_ref USING lr_template lt_order.
+  ENDIF.
 
 
   "=== 3) Tạo 1 dòng trống để có cấu trúc export ===
@@ -3846,13 +3948,13 @@ ENDFORM.
 FORM remove_components_from_ref USING ir_table TYPE REF TO data
                                       it_fields TYPE STANDARD TABLE.
 
-  DATA: lo_table    TYPE REF TO cl_abap_tabledescr,
-        lo_line     TYPE REF TO cl_abap_structdescr,
-        lt_comp     TYPE abap_component_tab,
-        ls_comp     TYPE abap_componentdescr,
-        lo_newline  TYPE REF TO cl_abap_structdescr,
-        lo_newtab   TYPE REF TO cl_abap_tabledescr,
-        lr_new      TYPE REF TO data.
+  DATA: lo_table   TYPE REF TO cl_abap_tabledescr,
+        lo_line    TYPE REF TO cl_abap_structdescr,
+        lt_comp    TYPE abap_component_tab,
+        ls_comp    TYPE abap_componentdescr,
+        lo_newline TYPE REF TO cl_abap_structdescr,
+        lo_newtab  TYPE REF TO cl_abap_tabledescr,
+        lr_new     TYPE REF TO data.
 
   FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE,
                  <lt_new> TYPE STANDARD TABLE,
@@ -3891,14 +3993,14 @@ ENDFORM.
 FORM reorder_components_ref USING ir_table TYPE REF TO data
                                   it_order TYPE STANDARD TABLE.
 
-  DATA: lo_table    TYPE REF TO cl_abap_tabledescr,
-        lo_line     TYPE REF TO cl_abap_structdescr,
-        lt_comp     TYPE abap_component_tab,
-        ls_comp     TYPE abap_componentdescr,
-        lt_newcomp  TYPE abap_component_tab,
-        lo_newline  TYPE REF TO cl_abap_structdescr,
-        lo_newtab   TYPE REF TO cl_abap_tabledescr,
-        lr_new      TYPE REF TO data.
+  DATA: lo_table   TYPE REF TO cl_abap_tabledescr,
+        lo_line    TYPE REF TO cl_abap_structdescr,
+        lt_comp    TYPE abap_component_tab,
+        ls_comp    TYPE abap_componentdescr,
+        lt_newcomp TYPE abap_component_tab,
+        lo_newline TYPE REF TO cl_abap_structdescr,
+        lo_newtab  TYPE REF TO cl_abap_tabledescr,
+        lr_new     TYPE REF TO data.
 
   FIELD-SYMBOLS: <lt_old> TYPE STANDARD TABLE,
                  <lt_new> TYPE STANDARD TABLE,
@@ -3938,6 +4040,9 @@ FORM reorder_components_ref USING ir_table TYPE REF TO data
   ir_table = lr_new.
 
 ENDFORM.
+
+
+
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_AUDIT (classic-syntax, no templates/inline)
@@ -4732,6 +4837,19 @@ FORM on_save.
   CLEAR gt_changed_existing_keys.
 
   PERFORM resort_and_refresh_alv.
+  " 7.1) Đồng bộ bản gốc để DISCARD khôi phục đúng phiên bản đã lưu
+FIELD-SYMBOLS: <lt_cur> TYPE STANDARD TABLE,
+               <lt_ori> TYPE STANDARD TABLE.
+
+ASSIGN gr_data->* TO <lt_cur>.
+IF <lt_cur> IS ASSIGNED.
+  " Tạo vùng nhớ cho bản gốc có cùng kiểu
+  CREATE DATA gr_data_original LIKE <lt_cur>.
+  ASSIGN gr_data_original->* TO <lt_ori>.
+  IF <lt_ori> IS ASSIGNED.
+    <lt_ori> = <lt_cur>.   " snapshot sau khi SAVE
+  ENDIF.
+ENDIF.
 
   " 8) Về View
   gv_dirty        = abap_false.
@@ -4755,8 +4873,8 @@ ENDFORM.
 
 *--------- delete ----------------------------
 FORM delete_selected USING    iv_tab TYPE tabname
-                     CHANGING ev_msg TYPE c
-                              ev_err TYPE c.
+                     CHANGING ev_msg TYPE string
+                              ev_err TYPE string.
 
   CLEAR: ev_msg, ev_err.
 
@@ -6044,50 +6162,41 @@ FORM discard_unsaved_changes.
                  <lt_orig> TYPE STANDARD TABLE,
                  <ls_orig> TYPE any.
 
-  " 0) Lấy itab hiện tại và bản gốc
   ASSIGN gr_data->*          TO <lt_cur>.
   ASSIGN gr_data_original->* TO <lt_orig>.
-
   IF <lt_cur> IS NOT ASSIGNED.
     RETURN.
   ENDIF.
 
-  " 1+2) HARD RESET an toàn: clear và rebuild <lt_cur> từ <lt_orig> bằng MOVE-CORRESPONDING
-  CLEAR <lt_cur>.
+  " ✅ Chỉ reset khi có bản gốc hợp lệ
   IF <lt_orig> IS ASSIGNED AND <lt_orig> IS NOT INITIAL.
+    CLEAR <lt_cur>.
     LOOP AT <lt_orig> ASSIGNING <ls_orig>.
       APPEND INITIAL LINE TO <lt_cur> ASSIGNING <ls_cur>.
-      " Chép các cột trùng tên (tránh dump khi cấu trúc khác nhau)
       MOVE-CORRESPONDING <ls_orig> TO <ls_cur>.
     ENDLOOP.
+  ELSE.
+    " ❗ Không có bản gốc → KHÔNG được xóa màn hình
+    " (tuỳ chọn) Bạn có thể reload từ DB để “chắc cú”:
+    " PERFORM reload_from_db CHANGING <lt_cur>.
   ENDIF.
 
-  " 3) Reset trạng thái & refresh UI
   CLEAR gt_changed_existing_keys.
-
   gv_dirty        = abap_false.
   gv_add_mode     = abap_false.
   gv_edit_md      = abap_false.
   gv_toolbar_mode = 'D'.
 
   PERFORM apply_editability_and_push.
-
   IF g_alv_grid IS BOUND.
-    TRY.
-        g_alv_grid->set_ready_for_input( 0 ).
-      CATCH cx_root.
-    ENDTRY.
-
+    TRY. g_alv_grid->set_ready_for_input( 0 ). CATCH cx_root. ENDTRY.
     g_alv_grid->refresh_table_display(
       EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-
-    TRY.
-        g_alv_grid->set_toolbar_interactive( ).
-      CATCH cx_root.
-    ENDTRY.
+    TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
   ENDIF.
 
 ENDFORM.
+
 
 
 
@@ -6456,6 +6565,8 @@ FORM check_newrec_duplicate_all
 
 ENDFORM.
 
+
+
 "===== ZFA25SAP23_DB =====
 
 " Tạo itab động dựa trên tên bảng
@@ -6759,6 +6870,12 @@ FORM load_data USING    iv_tab TYPE tabname
     MOVE-CORRESPONDING <ls_src_o> TO <ls_dst_o>.
   ENDLOOP.
 
+    "=== Nếu không có dữ liệu, vẫn đảm bảo ALV hoạt động ===
+  IF <lt_load> IS ASSIGNED AND <lt_load> IS INITIAL.
+    APPEND INITIAL LINE TO <lt_load>.
+    DELETE <lt_load> INDEX 1.
+  ENDIF.
+
 ENDFORM.
 
 
@@ -6800,7 +6917,6 @@ FORM save_data USING iv_tab TYPE tabname
       IF <ertim> IS ASSIGNED AND <ertim> IS INITIAL. <ertim> = sy-uzeit. ENDIF.
       IF <ernam> IS ASSIGNED AND <ernam> IS INITIAL. <ernam> = sy-uname. ENDIF.
     ENDIF.
-
     " Mọi trường hợp lưu -> set Changed*
     IF <aedat> IS ASSIGNED. <aedat> = sy-datum. ENDIF.
     IF <aetim> IS ASSIGNED. <aetim> = sy-uzeit. ENDIF.
@@ -7288,908 +7404,57 @@ FORM fallback_audit_fields CHANGING cs_row TYPE any.
 
 ENDFORM.
 
+
+
+
 "===== ZFA25SAP23_MAIN =====
 START-OF-SELECTION.
 
 DATA: lv_rows_main TYPE i,
-lv_err_main TYPE string,
-lt_meta TYPE ddfields. " metadata chi tiết
+      lv_err_main  TYPE string,
+      lt_meta      TYPE ddfields. " metadata chi tiết
 
 " 1. Lấy metadata đầy đủ từ DDIC
 PERFORM get_metadata USING p_tab CHANGING lt_meta.
 
 " 2. Tạo itab động cho bảng p_tab
 PERFORM create_dynamic_itab USING p_tab CHANGING gr_data.
-" 5. Load dữ liệu từ DB
+
+" 3. Load dữ liệu từ DB
 PERFORM load_data USING p_tab p_maxrow
-CHANGING gr_data lv_rows_main lv_err_main.
+  CHANGING gr_data lv_rows_main lv_err_main.
+
+" Nếu có lỗi thật sự (SQL lỗi, bảng không tồn tại, v.v.)
 IF lv_err_main IS NOT INITIAL.
-MESSAGE e398(00) WITH lv_err_main.
-RETURN.
+  MESSAGE e398(00) WITH lv_err_main.
+  RETURN.
 ENDIF.
-" 5.1 Merge audit log ngay sau khi load
+
+" Nếu load thành công nhưng không có bản ghi → chỉ báo nhẹ, KHÔNG chặn chương trình
+IF lv_rows_main = 0.
+  MESSAGE 'Không có dữ liệu trong bảng, hiển thị khung trống.' TYPE 'S' DISPLAY LIKE 'I'.
+ENDIF.
+
+" 4. Merge audit log ngay sau khi load
 FIELD-SYMBOLS <lt_data> TYPE STANDARD TABLE.
 ASSIGN gr_data->* TO <lt_data>.
 PERFORM ensure_keys USING p_tab.
 IF <lt_data> IS ASSIGNED AND <lt_data> IS NOT INITIAL.
   PERFORM merge_audit_log USING p_tab CHANGING <lt_data>.
 ENDIF.
-" 3. Tạo fieldcatalog cho ALV
+
+" 5. Tạo fieldcatalog cho ALV
 PERFORM build_fieldcat_all.
 
-" 4. Đồng bộ fieldcatalog với itab động
+" 6. Đồng bộ fieldcatalog với itab động
 PERFORM sync_fcat_with_itab CHANGING gt_fieldcat.
 
-" 4.1 Đưa ERDAT về ngay trước nhóm Created*/Changed*
+" 7. Đưa ERDAT về ngay trước nhóm Created*/Changed*
 PERFORM reorder_audit_cols CHANGING gt_fieldcat.
 
-PERFORM reorder_audit_cols CHANGING gt_fieldcat.
-
-
-" 6. Gọi screen hiển thị ALV
+" 8. Gọi screen hiển thị ALV
 CALL SCREEN 100.
 
-*&---------------------------------------------------------------------*
-*& Include ZFA25SAP23_F01  (FINAL – multi-select rollback)
-*&---------------------------------------------------------------------*
 
-"=== Kiểu dữ liệu dùng chung ==========================================
-TYPES: BEGIN OF ty_log_sel,
-         sel         TYPE c LENGTH 1,          " checkbox trong popup
-         mandt       TYPE mandt,
-         logid       TYPE zaudit_log-logid,
-         uname       TYPE zaudit_log-uname,
-         udate       TYPE zaudit_log-udate,
-         utime       TYPE zaudit_log-utime,
-         tabname     TYPE zaudit_log-tabname,
-         action      TYPE zaudit_log-action,
-         before_json TYPE zaudit_log-before_json,
-         after_json  TYPE zaudit_log-after_json,
-       END OF ty_log_sel.
 
-TYPES ty_t_log TYPE STANDARD TABLE OF zaudit_log WITH DEFAULT KEY.
 
-*---------------------------------------------------------------------*
-* Hiển thị lịch sử (nhiều chọn) và rollback (1 hoặc nhiều log)
-*---------------------------------------------------------------------*
-FORM show_audit_history.
-
-  DATA: lt_log_raw   TYPE STANDARD TABLE OF zaudit_log,
-        lt_log_disp  TYPE STANDARD TABLE OF ty_log_sel,
-        ls_log_raw   TYPE zaudit_log,
-        ls_log_disp  TYPE ty_log_sel,
-        lt_fieldcat  TYPE slis_t_fieldcat_alv,
-        lt_fieldcat2 TYPE slis_t_fieldcat_alv,
-        ls_fc        TYPE slis_fieldcat_alv,
-        ls_selfield  TYPE slis_selfield.
-
-  DATA: lv_action TYPE zaudit_log-action,
-        lv_title  TYPE c LENGTH 80,
-        lv_msg    TYPE string,
-        lv_ans    TYPE c LENGTH 1.
-
-  DATA: lt_picked    TYPE STANDARD TABLE OF ty_log_sel WITH DEFAULT KEY,
-        lt_final     TYPE ty_t_log,
-        ls_final     TYPE zaudit_log,
-        lt_seen_keys TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
-        lv_keystr    TYPE string.
-
-  DATA: lv_skip_insert TYPE i VALUE 0,
-        lv_skip_empty  TYPE i VALUE 0,
-        lv_conflicts   TYPE i VALUE 0,
-        lv_cnt         TYPE i VALUE 0.
-
-  DATA: lr_bef TYPE REF TO data.
-
-  FIELD-SYMBOLS: <ls_pick> TYPE ty_log_sel,
-                 <ls_bef>  TYPE any,
-                 <lt_bef>  TYPE ANY TABLE,
-                 <v>       TYPE any.
-
-  " 1) Tải log
-  SELECT *
-    FROM zaudit_log
-    INTO TABLE @lt_log_raw
-    WHERE tabname = @p_tab
-    ORDER BY udate DESCENDING, utime DESCENDING.
-
-  IF lt_log_raw IS INITIAL.
-    MESSAGE 'Không có lịch sử thay đổi' TYPE 'S' DISPLAY LIKE 'E'.
-    RETURN.
-  ENDIF.
-
-  " 2) Chuẩn bị outtab có checkbox
-  REFRESH lt_log_disp.
-  LOOP AT lt_log_raw INTO ls_log_raw.
-    CLEAR ls_log_disp.
-    ls_log_disp-mandt       = ls_log_raw-mandt.
-    ls_log_disp-logid       = ls_log_raw-logid.
-    ls_log_disp-uname       = ls_log_raw-uname.
-    ls_log_disp-udate       = ls_log_raw-udate.
-    ls_log_disp-utime       = ls_log_raw-utime.
-    ls_log_disp-tabname     = ls_log_raw-tabname.
-    ls_log_disp-action      = ls_log_raw-action.
-    ls_log_disp-before_json = ls_log_raw-before_json.
-    ls_log_disp-after_json  = ls_log_raw-after_json.
-    APPEND ls_log_disp TO lt_log_disp.
-  ENDLOOP.
-
-  " 3) Fieldcat + chèn cột checkbox
-  PERFORM build_fieldcat_audit CHANGING lt_fieldcat.
-  lt_fieldcat2 = lt_fieldcat.
-
-  CLEAR ls_fc.
-  ls_fc-fieldname = 'SEL'.
-  ls_fc-seltext_m = 'Sel'.
-  ls_fc-checkbox  = 'X'.
-  ls_fc-edit      = 'X'.
-  ls_fc-outputlen = 3.
-  ls_fc-no_out    = 'X'.
-  INSERT ls_fc INTO lt_fieldcat2 INDEX 1.
-
-  " 4) Popup multi-select
-  lv_title = |Chọn một hoặc nhiều log để rollback cho bảng { p_tab }|.
-  CALL FUNCTION 'REUSE_ALV_POPUP_TO_SELECT'
-    EXPORTING
-      i_tabname             = 'ZAUDIT_LOG'   " DDIC của bảng log
-      it_fieldcat           = lt_fieldcat2
-      i_title               = lv_title
-      i_zebra               = 'X'
-      i_screen_start_column = 5
-      i_screen_start_line   = 5
-      i_screen_end_column   = 140
-      i_screen_end_line     = 28
-      i_checkbox_fieldname  = 'SEL'
-    IMPORTING
-      es_selfield           = ls_selfield
-    TABLES
-      t_outtab              = lt_log_disp
-    EXCEPTIONS
-      program_error         = 1
-      OTHERS                = 2.
-  IF sy-subrc <> 0.
-    RETURN.
-  ENDIF.
-
-  " 5) Lấy dòng đã tick
-  REFRESH lt_picked.
-  LOOP AT lt_log_disp ASSIGNING <ls_pick>.
-    IF <ls_pick> IS ASSIGNED AND <ls_pick>-sel = 'X'.
-      APPEND <ls_pick> TO lt_picked.
-    ENDIF.
-  ENDLOOP.
-  IF lt_picked IS INITIAL.
-    MESSAGE 'Chưa chọn log nào để rollback' TYPE 'S'.
-    RETURN.
-  ENDIF.
-
-  " 6) Lấy key fields
-  PERFORM ensure_keys IN PROGRAM (sy-repid) USING p_tab IF FOUND.
-  IF gt_key_fields IS INITIAL.
-    MESSAGE |Bảng { p_tab } không có khóa trong DDIC.| TYPE 'S' DISPLAY LIKE 'E'.
-    RETURN.
-  ENDIF.
-
-  " 7) Lọc bỏ INSERT/JSON rỗng + chống conflict cùng khóa
-  REFRESH lt_final.
-  REFRESH lt_seen_keys.
-  DATA: lv_keyname TYPE dd03l-fieldname,
-        lv_piece   TYPE string,
-        lv_tmp     TYPE string.
-
-  LOOP AT lt_picked ASSIGNING <ls_pick>.
-    IF <ls_pick> IS NOT ASSIGNED.
-      CONTINUE.
-    ENDIF.
-
-    lv_action = <ls_pick>-action.
-    TRANSLATE lv_action TO UPPER CASE.
-
-    IF lv_action = 'INSERT'.
-      lv_skip_insert += 1.
-      CONTINUE.
-    ENDIF.
-
-    IF <ls_pick>-before_json IS INITIAL.
-      lv_skip_empty += 1.
-      CONTINUE.
-    ENDIF.
-
-    CLEAR lr_bef.
-    PERFORM json_to_itab IN PROGRAM (sy-repid)
-      USING <ls_pick>-tabname <ls_pick>-before_json
-      CHANGING lr_bef IF FOUND.
-    IF lr_bef IS INITIAL.
-      lv_skip_empty += 1.
-      CONTINUE.
-    ENDIF.
-
-    ASSIGN lr_bef->* TO <lt_bef>.
-    IF <lt_bef> IS NOT ASSIGNED OR <lt_bef> IS INITIAL.
-      lv_skip_empty += 1.
-      CONTINUE.
-    ENDIF.
-
-    UNASSIGN <ls_bef>.
-    LOOP AT <lt_bef> ASSIGNING <ls_bef>. EXIT. ENDLOOP.
-    IF <ls_bef> IS NOT ASSIGNED.
-      lv_skip_empty += 1.
-      CONTINUE.
-    ENDIF.
-
-    CLEAR lv_keystr.
-    LOOP AT gt_key_fields INTO lv_keyname.
-      ASSIGN COMPONENT lv_keyname OF STRUCTURE <ls_bef> TO <v>.
-      CLEAR lv_piece.
-      IF sy-subrc = 0 AND <v> IS ASSIGNED.
-        lv_tmp = <v>.
-        TRANSLATE lv_tmp TO UPPER CASE.
-        CONDENSE lv_tmp NO-GAPS.
-        lv_piece = lv_tmp.
-      ELSE.
-        lv_piece = ''.
-      ENDIF.
-      IF lv_keystr IS INITIAL.
-        lv_keystr = lv_piece.
-      ELSE.
-        CONCATENATE lv_keystr lv_piece INTO lv_keystr SEPARATED BY '|'.
-      ENDIF.
-    ENDLOOP.
-
-    READ TABLE lt_seen_keys WITH KEY table_line = lv_keystr TRANSPORTING NO FIELDS.
-    IF sy-subrc = 0.
-      lv_conflicts = lv_conflicts + 1.
-      CONTINUE.
-    ELSE.
-      APPEND lv_keystr TO lt_seen_keys.
-    ENDIF.
-
-    CLEAR ls_final.
-    ls_final-mandt       = <ls_pick>-mandt.
-    ls_final-logid       = <ls_pick>-logid.
-    ls_final-uname       = <ls_pick>-uname.
-    ls_final-udate       = <ls_pick>-udate.
-    ls_final-utime       = <ls_pick>-utime.
-    ls_final-tabname     = <ls_pick>-tabname.
-    ls_final-action      = <ls_pick>-action.
-    ls_final-before_json = <ls_pick>-before_json.
-    ls_final-after_json  = <ls_pick>-after_json.
-    APPEND ls_final TO lt_final.
-  ENDLOOP.
-
-  IF lt_final IS INITIAL.
-    lv_msg = |Không có log hợp lệ để rollback (bỏ { lv_skip_insert } INSERT, { lv_skip_empty } JSON rỗng, { lv_conflicts } conflict).|.
-    MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
-    RETURN.
-  ENDIF.
-
-* 8) Xác nhận
-  DESCRIBE TABLE lt_final LINES lv_cnt.
-  lv_msg = |Bạn có muốn rollback { lv_cnt } log không?|.
-
-  CALL FUNCTION 'POPUP_TO_CONFIRM'
-    EXPORTING
-      titlebar              = 'Xác nhận'
-      text_question         = lv_msg
-      display_cancel_button = ' '       " Chỉ Yes/No
-    IMPORTING
-      answer                = lv_ans.
-
-  IF lv_ans = '2'.                                  " '2' = No
-    MESSAGE 'Hủy rollback thành công.' TYPE 'S'.    " hoặc DISPLAY LIKE 'I'
-    RETURN.
-  ENDIF.
-  IF lv_ans <> '1'.                                 " khác 'Yes' thì thoát
-    RETURN.
-  ENDIF.
-
-
-
-  " 9) Thực thi
-  IF lv_cnt = 1.
-    READ TABLE lt_final INDEX 1 INTO ls_final.
-    IF sy-subrc = 0.
-      PERFORM rollback_from_history USING ls_final.
-    ENDIF.
-  ELSE.
-    DATA: lv_rows_ok TYPE i,
-          lv_err     TYPE string.
-    PERFORM perform_batch_rollback USING p_tab lt_final
-                                   CHANGING lv_rows_ok lv_err.
-    IF lv_err IS NOT INITIAL.
-      MESSAGE lv_err TYPE 'S' DISPLAY LIKE 'E'.
-      RETURN.
-    ENDIF.
-  ENDIF.
-
-  " 10) Refresh ALV
-  PERFORM reload_after_change USING p_tab.
-  ENDFORM.
-
-
-*=====================================================================*
-* Batch rollback: rollback nhiều log trong 1 transaction + 1 email
-*=====================================================================*
-FORM perform_batch_rollback
-  USING    iv_tab      TYPE tabname
-           it_logs     TYPE ty_t_log
-  CHANGING cv_rows_ok  TYPE i
-           cv_err      TYPE string.
-
-  DATA: lt_logs_local TYPE ty_t_log,
-        ls_log        TYPE zaudit_log.
-
-  DATA: lo_struct TYPE REF TO cl_abap_structdescr,
-        lo_table  TYPE REF TO cl_abap_tabledescr,
-        lr_targ   TYPE REF TO data,
-        lr_curr   TYPE REF TO data.
-
-  FIELD-SYMBOLS: <lt_targ> TYPE STANDARD TABLE,
-                 <lt_curr> TYPE STANDARD TABLE,
-                 <ls_row>  TYPE any.
-
-  DATA lr_one_json TYPE REF TO data.
-  FIELD-SYMBOLS: <lt_one> TYPE ANY TABLE,
-                 <ls_one> TYPE any.
-
-  DATA: lv_where TYPE string,
-        lv_we    TYPE string.
-
-  DATA: lv_rows_ok TYPE i VALUE 0,
-        lv_fail    TYPE abap_bool VALUE abap_false,
-        lv_rc      TYPE sy-subrc.
-
-  DATA: lv_curr_json TYPE zde_json_txt,
-        lv_targ_json TYPE zde_json_txt,
-        ls_newlog    TYPE zaudit_log.
-  " Danh sách log để nhúng vào email gộp
-  DATA: lv_loglist TYPE string,
-        lv_one     TYPE string.
-
-  CLEAR: cv_rows_ok, cv_err.
-
-  " Sao chép input
-  lt_logs_local = it_logs.
-  IF lt_logs_local IS INITIAL.
-    cv_err = 'Không có log để rollback (batch).'.
-    RETURN.
-  ENDIF.
-
-  " Tạo itab động theo DDIC của iv_tab
-  lo_struct ?= cl_abap_typedescr=>describe_by_name( iv_tab ).
-  IF lo_struct IS INITIAL.
-    cv_err = |Không mô tả được cấu trúc bảng { iv_tab }|.
-    RETURN.
-  ENDIF.
-  lo_table = cl_abap_tabledescr=>create( p_line_type = lo_struct ).
-
-  CREATE DATA lr_targ TYPE HANDLE lo_table.
-  CREATE DATA lr_curr TYPE HANDLE lo_table.
-  ASSIGN lr_targ->* TO <lt_targ>.
-  ASSIGN lr_curr->* TO <lt_curr>.
-  REFRESH: <lt_targ>, <lt_curr>.
-
-  " Gom mục tiêu từ BEFORE_JSON
-  LOOP AT lt_logs_local INTO ls_log.
-    CLEAR lr_one_json.
-    PERFORM json_to_itab IN PROGRAM (sy-repid)
-      USING iv_tab ls_log-before_json
-      CHANGING lr_one_json IF FOUND.
-    IF lr_one_json IS INITIAL.
-      CONTINUE.
-    ENDIF.
-
-    ASSIGN lr_one_json->* TO <lt_one>.
-    IF <lt_one> IS INITIAL.
-      CONTINUE.
-    ENDIF.
-
-    LOOP AT <lt_one> ASSIGNING <ls_one>.
-      APPEND <ls_one> TO <lt_targ>.
-    ENDLOOP.
-  ENDLOOP.
-
-  IF <lt_targ> IS INITIAL.
-    cv_err = 'Không có dữ liệu mục tiêu để rollback (batch).'.
-    RETURN.
-  ENDIF.
-
-  " Lấy key fields
-  PERFORM ensure_keys IN PROGRAM (sy-repid) USING iv_tab IF FOUND.
-  IF gt_key_fields IS INITIAL.
-    cv_err = |Không tìm thấy key fields cho bảng { iv_tab }|.
-    RETURN.
-  ENDIF.
-
-  " Snapshot hiện trạng
-  LOOP AT <lt_targ> ASSIGNING <ls_row>.
-    CLEAR: lv_where, lv_we.
-    PERFORM make_where_from_key IN PROGRAM (sy-repid)
-      USING <ls_row> gt_key_fields
-      CHANGING lv_where lv_we IF FOUND.
-    IF lv_where IS INITIAL.
-      CONTINUE.
-    ENDIF.
-
-    DATA lr_currow TYPE REF TO data.
-    CREATE DATA lr_currow TYPE HANDLE lo_struct.
-    ASSIGN lr_currow->* TO FIELD-SYMBOL(<lcur>).
-    CLEAR <lcur>.
-
-    SELECT SINGLE * FROM (iv_tab) WHERE (lv_where) INTO @<lcur>.
-    IF sy-subrc = 0.
-      APPEND <lcur> TO <lt_curr>.
-    ENDIF.
-  ENDLOOP.
-
-  " Serialize snapshot & target cho audit/mail
-  /ui2/cl_json=>serialize(
-    EXPORTING data        = <lt_curr>
-              pretty_name = /ui2/cl_json=>pretty_mode-none
-    RECEIVING r_json      = lv_curr_json ).
-  /ui2/cl_json=>serialize(
-    EXPORTING data        = <lt_targ>
-              pretty_name = /ui2/cl_json=>pretty_mode-none
-    RECEIVING r_json      = lv_targ_json ).
-
-  " Khôi phục: DELETE-by-key rồi INSERT
-  LOOP AT <lt_targ> ASSIGNING <ls_row>.
-    CLEAR: lv_where, lv_we.
-    PERFORM make_where_from_key IN PROGRAM (sy-repid)
-      USING <ls_row> gt_key_fields
-      CHANGING lv_where lv_we IF FOUND.
-    IF lv_where IS INITIAL.
-      lv_fail = abap_true.
-      EXIT.
-    ENDIF.
-
-    DELETE FROM (iv_tab) WHERE (lv_where).
-    INSERT (iv_tab) FROM <ls_row>.
-    lv_rc = sy-subrc.
-    IF lv_rc <> 0.
-      lv_fail = abap_true.
-      EXIT.
-    ELSE.
-      lv_rows_ok = lv_rows_ok + 1.
-      PERFORM log_audit_action IN PROGRAM (sy-repid)
-       USING iv_tab 'U' <ls_row> IF FOUND.
-    ENDIF.
-  ENDLOOP.
-
-  IF lv_fail = abap_true.
-    ROLLBACK WORK.
-    cv_err = 'Rollback batch thất bại – đã ROLLBACK toàn bộ.'.
-    RETURN.
-  ENDIF.
-
-  " Ghi 1 dòng audit gộp
-  CLEAR ls_newlog.
-  CALL FUNCTION 'GUID_CREATE'
-    IMPORTING
-      ev_guid_32 = ls_newlog-logid.
-  ls_newlog-mandt       = sy-mandt.
-  ls_newlog-uname       = sy-uname.
-  ls_newlog-udate       = sy-datum.
-  ls_newlog-utime       = sy-uzeit.
-  ls_newlog-tabname     = iv_tab.
-  ls_newlog-action      = 'ROLLBACK-BATCH'.
-  ls_newlog-before_json = lv_curr_json.
-  ls_newlog-after_json  = lv_targ_json.
-  INSERT zaudit_log FROM ls_newlog.
-
-  " Commit & build danh sách log để nhúng vào email gộp
-  COMMIT WORK AND WAIT.
-
-  CLEAR lv_loglist.
-  lv_loglist = |Batch rollback { lines( lt_logs_local ) } log(s):|.
-  LOOP AT lt_logs_local INTO ls_log.
-    CLEAR lv_one.
-    lv_one = |[LOGID={ ls_log-logid(8) } USER={ ls_log-uname } DATE={ ls_log-udate } TIME={ ls_log-utime } ACTION={ ls_log-action }]|.
-    CONCATENATE lv_loglist
-                cl_abap_char_utilities=>newline
-                lv_one
-           INTO lv_loglist.
-  ENDLOOP.
-
-  " Gửi 1 email gộp có kèm danh sách các log
-  PERFORM notify_rollback_smtp IN PROGRAM (sy-repid)
-    USING ls_newlog
-          lv_rows_ok
-          lv_curr_json
-          lv_targ_json
-          lv_loglist        " <<< thay 'space' bằng danh sách log
-          IF FOUND.
-
-
-  " Trả kết quả
-  cv_rows_ok = lv_rows_ok.
-  cv_err     = ''.
-
-  MESSAGE |Rollback OK: { lv_rows_ok } row(s) từ { lines( lt_logs_local ) } log| TYPE 'S'.
-
-ENDFORM.
-
-*---------------------------------------------------------------------*
-* Field catalog cho popup lịch sử
-*---------------------------------------------------------------------*
-FORM build_fieldcat_audit CHANGING ct_fieldcat TYPE slis_t_fieldcat_alv.
-  DATA ls_fieldcat TYPE slis_fieldcat_alv.
-
-  DEFINE add_field.
-    CLEAR ls_fieldcat.
-    ls_fieldcat-fieldname = &1.
-    ls_fieldcat-seltext_m = &2.
-    ls_fieldcat-outputlen = &3.
-    APPEND ls_fieldcat TO ct_fieldcat.
-  END-OF-DEFINITION.
-
-  add_field 'LOGID'       'Log ID'               32.
-  add_field 'UNAME'       'Người dùng'           12.
-  add_field 'UDATE'       'Ngày'                 10.
-  add_field 'UTIME'       'Giờ'                   8.
-  add_field 'ACTION'      'Hành động'            10.
-  add_field 'BEFORE_JSON' 'Dữ liệu trước (JSON)' 50.
-  add_field 'AFTER_JSON'  'Dữ liệu sau (JSON)'   50.
-ENDFORM.
-
-*---------------------------------------------------------------------*
-* Rollback 1 log (giữ nguyên behavior cũ)
-*---------------------------------------------------------------------*
-FORM rollback_from_history USING is_log TYPE zaudit_log.
-
-  DATA: lv_mod       TYPE i,
-        lv_err       TYPE string,
-        lv_curr_json TYPE zde_json_txt,
-        lr_target    TYPE REF TO data,
-        lr_curr      TYPE REF TO data.
-
-  FIELD-SYMBOLS: <lt_target> TYPE STANDARD TABLE,
-                 <ls_target> TYPE any,
-                 <lt_curr>   TYPE STANDARD TABLE,
-                 <ls_curr>   TYPE any.
-
-  "--- Không cho rollback log tạo mới
-  DATA lv_act TYPE zaudit_log-action.
-  lv_act = is_log-action.
-  TRANSLATE lv_act TO UPPER CASE.
-  IF lv_act = 'INSERT'.
-    MESSAGE |Log { is_log-logid(8) } là CREATE (INSERT) – không thể rollback.| TYPE 'S' DISPLAY LIKE 'E'.
-    RETURN.
-  ENDIF.
-
-  "--- Parse BEFORE_JSON -> itab mục tiêu
-  PERFORM json_to_itab IN PROGRAM (sy-repid)
-       USING is_log-tabname is_log-before_json
-       CHANGING lr_target IF FOUND.
-  ASSIGN lr_target->* TO <lt_target>.
-  IF <lt_target> IS NOT ASSIGNED OR <lt_target> IS INITIAL.
-    MESSAGE |Không đọc được BEFORE_JSON của log { is_log-logid }| TYPE 'S' DISPLAY LIKE 'E'.
-    RETURN.
-  ENDIF.
-
-  "--- Lấy key
-  PERFORM ensure_keys IN PROGRAM (sy-repid) USING is_log-tabname IF FOUND.
-  IF gt_key_fields IS INITIAL.
-    MESSAGE |Không tìm thấy key fields cho bảng { is_log-tabname }| TYPE 'S' DISPLAY LIKE 'E'.
-    RETURN.
-  ENDIF.
-
-  "--- Snapshot hiện trạng (để gửi mail)
-  DATA: lo_tdesc TYPE REF TO cl_abap_tabledescr,
-        lo_ldesc TYPE REF TO cl_abap_structdescr,
-        lr_row   TYPE REF TO data.
-  lo_tdesc ?= cl_abap_typedescr=>describe_by_data_ref( lr_target ).
-  lo_ldesc ?= lo_tdesc->get_table_line_type( ).
-  CREATE DATA lr_curr TYPE HANDLE lo_tdesc.
-  ASSIGN lr_curr->* TO <lt_curr>.
-
-  LOOP AT <lt_target> ASSIGNING <ls_target>.
-    DATA: lv_where TYPE string,
-          lv_we    TYPE string.
-    PERFORM make_where_from_key IN PROGRAM (sy-repid)
-      USING <ls_target> gt_key_fields
-      CHANGING lv_where lv_we IF FOUND.
-    IF lv_where IS INITIAL.
-      CONTINUE.
-    ENDIF.
-
-    CREATE DATA lr_row TYPE HANDLE lo_ldesc.
-    ASSIGN lr_row->* TO <ls_curr>.
-    CLEAR <ls_curr>.
-
-    SELECT SINGLE * FROM (is_log-tabname) WHERE (lv_where) INTO @<ls_curr>.
-    IF sy-subrc = 0.
-      APPEND <ls_curr> TO <lt_curr>.
-    ENDIF.
-  ENDLOOP.
-
-  IF <lt_curr> IS NOT INITIAL.
-    /ui2/cl_json=>serialize(
-       EXPORTING data        = <lt_curr>
-                 pretty_name = /ui2/cl_json=>pretty_mode-none
-       RECEIVING r_json      = lv_curr_json ).
-  ELSE.
-    lv_curr_json = '[]'.
-  ENDIF.
-
-  "--- Khôi phục dữ liệu theo BEFORE_JSON
-  PERFORM restore_data IN PROGRAM (sy-repid)
-    USING is_log-tabname
-          is_log-before_json
-    CHANGING lv_err lv_mod IF FOUND.
-  IF lv_err IS NOT INITIAL.
-    MESSAGE lv_err TYPE 'S' DISPLAY LIKE 'E'.
-    RETURN.
-  ENDIF.
-
-*  "=== BỔ SUNG: Ghi log mỏng cho từng dòng để ALV có Changed* ngay ===
-*  DATA lr_targ2 TYPE REF TO data.
-*  FIELD-SYMBOLS: <lt_targ2> TYPE STANDARD TABLE,
-*                 <ls_t2>    TYPE any.
-*
-*  PERFORM json_to_itab IN PROGRAM (sy-repid)
-*    USING is_log-tabname is_log-before_json
-*    CHANGING lr_targ2 IF FOUND.
-*
-*  ASSIGN lr_targ2->* TO <lt_targ2>.
-*  IF <lt_targ2> IS ASSIGNED.
-*    LOOP AT <lt_targ2> ASSIGNING <ls_t2>.
-*      PERFORM log_audit_action IN PROGRAM (sy-repid)
-*        USING is_log-tabname 'U' <ls_t2> IF FOUND.
-*    ENDLOOP.
-*  ENDIF.
-
-  COMMIT WORK AND WAIT. " để merge_audit_log đọc được ngay
-
-  "--- Thông báo & gửi mail
-  MESSAGE |Rollback thành công (log: { is_log-logid(8) }, rows: { lv_mod })| TYPE 'S'.
-
-  PERFORM notify_rollback_smtp IN PROGRAM (sy-repid)
-    USING is_log
-          lv_mod
-          lv_curr_json
-          is_log-before_json
-          space
-          IF FOUND.
-
-  "--- Reload để hiển thị Changed* ngay
-  PERFORM reload_after_change USING is_log-tabname.
-
-ENDFORM.
-
-
-*---------------------------------------------------------------------*
-* Reload dữ liệu và refresh ALV sau khi có thay đổi DB
-*---------------------------------------------------------------------*
-FORM reload_after_change USING iv_tab TYPE tabname.
-
-  DATA: lv_rows TYPE i,
-        lv_err  TYPE string.
-
-  " 1) Reload DB
-  PERFORM load_data USING iv_tab 0
-                    CHANGING gr_data lv_rows lv_err.
-  IF lv_err IS NOT INITIAL.
-    MESSAGE lv_err TYPE 'S' DISPLAY LIKE 'E'.
-    RETURN.
-  ENDIF.
-
-  " 2) Merge lại audit để các cột Created*/Changed* đúng ngay sau rollback
-  FIELD-SYMBOLS <lt_data> TYPE STANDARD TABLE.
-  ASSIGN gr_data->* TO <lt_data>.
-  PERFORM ensure_keys USING iv_tab.
-  IF <lt_data> IS ASSIGNED AND <lt_data> IS NOT INITIAL.
-    PERFORM merge_audit_log USING iv_tab CHANGING <lt_data>.
-  ENDIF.
-
-  " 3) Build lại fieldcatalog và sync với itab động, rồi sắp xếp nhóm audit
-  PERFORM build_fieldcat_all.
-  PERFORM sync_fcat_with_itab CHANGING gt_fieldcat.
-  PERFORM reorder_audit_cols   CHANGING gt_fieldcat.
-
-  " 4) Reset mode + rebind ALV (không chỉ refresh)
-  gv_add_mode     = abap_false.
-  gv_edit_md      = abap_false.
-  gv_toolbar_mode = 'D'.
-  PERFORM apply_editability_and_push.
-
-  IF g_alv_grid IS BOUND.
-    TRY.
-        g_alv_grid->set_ready_for_input( 0 ).
-      CATCH cx_root.
-    ENDTRY.
-
-    TRY.
-        g_alv_grid->set_table_for_first_display(
-          EXPORTING is_layout       = gs_layout
-          CHANGING  it_outtab       = <lt_data>
-                    it_fieldcatalog = gt_fieldcat ).
-      CATCH cx_root.
-        " Fallback: tối thiểu vẫn refresh nếu rebind lỗi
-        DATA(ls_stbl) = VALUE lvc_s_stbl( row = 'X' col = 'X' ).
-        g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
-    ENDTRY.
-
-    TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
-  ENDIF.
-
-ENDFORM.
-
-
-
-*&---------------------------------------------------------------------*
-*& sap xep ERDAT
-*&---------------------------------------------------------------------*
-
-FORM reorder_audit_cols CHANGING ct_fcat TYPE lvc_t_fcat.
-  DATA lt_keep  TYPE lvc_t_fcat.
-  DATA lt_audit TYPE lvc_t_fcat.
-  DATA ls       TYPE lvc_s_fcat.
-  FIELD-SYMBOLS <fc> TYPE lvc_s_fcat.
-
-  " 1) Tách nhóm audit ra khỏi danh sách
-  LOOP AT ct_fcat ASSIGNING <fc>.
-    DATA(lvfn) = to_upper( <fc>-fieldname ).
-    IF lvfn = 'ERDAT' OR lvfn = 'ERTIM' OR lvfn = 'ERNAM'
-     OR lvfn = 'AEDAT' OR lvfn = 'AETIM' OR lvfn = 'AENAM'.
-      APPEND <fc> TO lt_audit.
-    ELSE.
-      APPEND <fc> TO lt_keep.
-    ENDIF.
-  ENDLOOP.
-
-  " 2) Ghép lại: business trước, rồi audit theo thứ tự mong muốn
-  REFRESH ct_fcat.
-  APPEND LINES OF lt_keep TO ct_fcat.
-
-  DEFINE _append_audit.
-    READ TABLE lt_audit INTO ls WITH KEY fieldname = &1.
-    IF sy-subrc = 0.
-      APPEND ls TO ct_fcat.
-    ENDIF.
-  END-OF-DEFINITION.
-
-  _append_audit 'ERDAT'.   " Ngày tạo  -> muốn đứng ngay trước Created Time/By
-  _append_audit 'ERTIM'.   " Created Time
-  _append_audit 'ERNAM'.   " Created By
-  _append_audit 'AEDAT'.   " Changed On
-  _append_audit 'AETIM'.   " Changed Time
-  _append_audit 'AENAM'.   " Changed By
-
-  " 3) Refresh lại COL_POS để cố định vị trí
-  DATA lv_pos TYPE i VALUE 1.
-  LOOP AT ct_fcat ASSIGNING <fc>.
-    <fc>-col_pos = lv_pos.
-    lv_pos += 1.
-  ENDLOOP.
-ENDFORM.
-
-
-
-
-"=== ZFA25SAP23_F01 ================================================
-FORM sort_current_view_by_ddic_key.
-
-  FIELD-SYMBOLS: <lt_all>     TYPE STANDARD TABLE,
-                 <lt_saved>   TYPE STANDARD TABLE,
-                 <lt_newrec>  TYPE STANDARD TABLE,
-                 <ls_any>     TYPE any,
-                 <flag_new>   TYPE any.
-
-  IF gr_data IS INITIAL.
-    RETURN.
-  ENDIF.
-
-  ASSIGN gr_data->* TO <lt_all>.
-  IF <lt_all> IS NOT ASSIGNED OR <lt_all> IS INITIAL.
-    RETURN.
-  ENDIF.
-
-  "--- Chia saved vs newrec để tránh xáo vị trí dòng đang nhập
-  DATA lo_tab TYPE REF TO cl_abap_tabledescr.
-  lo_tab ?= cl_abap_tabledescr=>describe_by_data_ref( REF #( <lt_all> ) ).
-
-  DATA lr_saved TYPE REF TO data.
-  DATA lr_new   TYPE REF TO data.
-  CREATE DATA lr_saved TYPE HANDLE lo_tab.
-  CREATE DATA lr_new   TYPE HANDLE lo_tab.
-  ASSIGN lr_saved->* TO <lt_saved>.
-  ASSIGN lr_new->*   TO <lt_newrec>.
-
-  LOOP AT <lt_all> ASSIGNING <ls_any>.
-    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls_any> TO <flag_new>.
-    IF sy-subrc = 0 AND <flag_new> = 'X'.
-      APPEND <ls_any> TO <lt_newrec>.
-    ELSE.
-      APPEND <ls_any> TO <lt_saved>.
-    ENDIF.
-  ENDLOOP.
-
-  "--- Sort theo KHÓA DDIC (dùng logic hiện có của bạn)
-  PERFORM ensure_keys USING p_tab.                       "đã có sẵn :contentReference[oaicite:0]{index=0}
-  IF gt_key_fields IS NOT INITIAL AND <lt_saved> IS ASSIGNED.
-
-    DATA(lv_key) = gt_key_fields[ 1 ].
-    IF lv_key IS NOT INITIAL.
-
-      FIELD-SYMBOLS: <ls_row> TYPE any, <val> TYPE any.
-      DATA(lv_all_numeric) = abap_true.
-
-      LOOP AT <lt_saved> ASSIGNING <ls_row>.
-        ASSIGN COMPONENT lv_key OF STRUCTURE <ls_row> TO <val>.
-        IF sy-subrc <> 0 OR <val> IS INITIAL. CONTINUE. ENDIF.
-        DATA(lv_raw) = CONV string( <val> ).
-        CONDENSE lv_raw NO-GAPS.
-        IF NOT lv_raw CO '0123456789'.
-          lv_all_numeric = abap_false.
-          EXIT.
-        ENDIF.
-      ENDLOOP.
-
-      IF lv_all_numeric = abap_true.
-        "Sort số theo key
-        TYPES: BEGIN OF ty_idx, idx TYPE i, num TYPE p LENGTH 16 DECIMALS 0, END OF ty_idx.
-        DATA: lt_idx TYPE STANDARD TABLE OF ty_idx, ls_idx TYPE ty_idx, lv_idx TYPE i VALUE 0.
-
-        LOOP AT <lt_saved> ASSIGNING <ls_row>.
-          lv_idx += 1.
-          ASSIGN COMPONENT lv_key OF STRUCTURE <ls_row> TO <val>.
-          CLEAR ls_idx.
-          ls_idx-idx = lv_idx.
-          IF sy-subrc = 0 AND <val> IS ASSIGNED.
-            DATA(lv_raw2) = CONV string( <val> ).
-            CONDENSE lv_raw2 NO-GAPS.
-            IF lv_raw2 CO '0123456789'.
-              ls_idx-num = lv_raw2.
-            ENDIF.
-          ENDIF.
-          APPEND ls_idx TO lt_idx.
-        ENDLOOP.
-
-        SORT lt_idx BY num.
-
-        DATA lr_sorted TYPE REF TO data.
-        FIELD-SYMBOLS: <lt_sorted> TYPE STANDARD TABLE,
-                       <ls_src>    TYPE any,
-                       <ls_new2>   TYPE any.
-        CREATE DATA lr_sorted LIKE <lt_saved>.
-        ASSIGN lr_sorted->* TO <lt_sorted>.
-
-        LOOP AT lt_idx INTO ls_idx.
-          READ TABLE <lt_saved> INDEX ls_idx-idx ASSIGNING <ls_src>.
-          IF sy-subrc = 0 AND <ls_src> IS ASSIGNED.
-            APPEND INITIAL LINE TO <lt_sorted> ASSIGNING <ls_new2>.
-            MOVE-CORRESPONDING <ls_src> TO <ls_new2>.
-          ENDIF.
-        ENDLOOP.
-
-        "Ghép lại: saved đã sort + giữ nguyên các NEWREC ở cuối
-        CLEAR <lt_all>.
-        APPEND LINES OF <lt_sorted> TO <lt_all>.
-        APPEND LINES OF <lt_newrec> TO <lt_all>.
-
-      ELSE.
-        "Sort chữ theo key (ổn định)
-        SORT <lt_saved> STABLE BY (lv_key).
-        CLEAR <lt_all>.
-        APPEND LINES OF <lt_saved> TO <lt_all>.
-        APPEND LINES OF <lt_newrec> TO <lt_all>.
-      ENDIF.
-
-    ENDIF.
-  ENDIF.
-
-ENDFORM.
-
-
-FORM resort_and_refresh_alv.
-  PERFORM sort_current_view_by_ddic_key.
-  IF g_alv_grid IS BOUND.
-    TRY.
-        g_alv_grid->refresh_table_display(
-          EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
-        g_alv_grid->set_toolbar_interactive( ).
-      CATCH cx_root.
-    ENDTRY.
-  ENDIF.
-ENDFORM.
