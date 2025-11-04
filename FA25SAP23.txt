@@ -7874,6 +7874,13 @@ FORM show_audit_history.
     lv_action = <ls_pick>-action.
     TRANSLATE lv_action TO UPPER CASE.
 
+    "Cấm mọi action bắt đầu bằng 'ROLLBACK'
+    IF lv_action CP 'ROLLBACK*'.
+      lv_msg = |Không thể rollback log { <ls_pick>-logid(8) } vì action = { <ls_pick>-action }.|.
+      MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+      RETURN. " hoặc EXIT khỏi loop rồi RETURN, tùy bạn muốn cứng hay mềm
+    ENDIF.
+
     IF lv_action = 'INSERT'.
       lv_skip_insert += 1.
       CONTINUE.
@@ -8314,22 +8321,22 @@ FORM rollback_from_history USING is_log TYPE zaudit_log.
     RETURN.
   ENDIF.
 
-*  "=== BỔ SUNG: Ghi log mỏng cho từng dòng để ALV có Changed* ngay ===
-*  DATA lr_targ2 TYPE REF TO data.
-*  FIELD-SYMBOLS: <lt_targ2> TYPE STANDARD TABLE,
-*                 <ls_t2>    TYPE any.
-*
-*  PERFORM json_to_itab IN PROGRAM (sy-repid)
-*    USING is_log-tabname is_log-before_json
-*    CHANGING lr_targ2 IF FOUND.
-*
-*  ASSIGN lr_targ2->* TO <lt_targ2>.
-*  IF <lt_targ2> IS ASSIGNED.
-*    LOOP AT <lt_targ2> ASSIGNING <ls_t2>.
-*      PERFORM log_audit_action IN PROGRAM (sy-repid)
-*        USING is_log-tabname 'U' <ls_t2> IF FOUND.
-*    ENDLOOP.
-*  ENDIF.
+    "--- Ghi 1 dòng audit 'ROLLBACK' (single)
+  DATA ls_rb TYPE zaudit_log.
+  CLEAR ls_rb.
+  CALL FUNCTION 'GUID_CREATE'
+    IMPORTING
+      ev_guid_32 = ls_rb-logid.
+  ls_rb-mandt       = sy-mandt.
+  ls_rb-uname       = sy-uname.
+  ls_rb-udate       = sy-datum.
+  ls_rb-utime       = sy-uzeit.
+  ls_rb-tabname     = is_log-tabname.
+  ls_rb-action      = 'ROLLBACK'.
+  ls_rb-before_json = lv_curr_json.        " snapshot trước khi khôi phục
+  ls_rb-after_json  = is_log-before_json.  " trạng thái mục tiêu sau khôi phục
+  INSERT zaudit_log FROM ls_rb.
+
 
   COMMIT WORK AND WAIT. " để merge_audit_log đọc được ngay
 
@@ -8670,8 +8677,3 @@ FORM resort_and_refresh_alv.
     ENDTRY.
   ENDIF.
 ENDFORM.
-
-
-
-
-
