@@ -3700,13 +3700,14 @@ FORM upload_data_strict_match.
   PERFORM apply_editability_and_push.
   gv_in_upload = abap_false.
 
-  "=== [UPLOAD_NOTIFY] Gửi mail sau khi upload dữ liệu Excel ===
-  IF lv_new_count > 0 OR lv_changed_count > 0.
-    DATA(lt_changes) = VALUE zty_change_tab( ).
-    PERFORM notify_save_smtp
-      USING p_tab lv_new_count lv_changed_count 0
-      CHANGING lt_changes.
-  ENDIF.
+*  "=== [UPLOAD_NOTIFY] Gửi mail sau khi upload dữ liệu Excel ===
+*  IF lv_new_count > 0 OR lv_changed_count > 0.
+*    DATA(lt_changes) = VALUE zty_change_tab( ).
+*    PERFORM notify_save_smtp
+*      USING p_tab lv_new_count lv_changed_count 0
+*      CHANGING lt_changes.
+*  ENDIF.
+
 
 
 ENDFORM.
