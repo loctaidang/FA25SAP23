@@ -122,8 +122,6 @@ TYPES: BEGIN OF zty_change,
 TYPES: zty_change_tab TYPE STANDARD TABLE OF zty_change WITH DEFAULT KEY.
 "=====================================================================
 
-
-
 "===== INCLUDE ZFA25SAP23_SEL =====
 
 " Khối tham số
@@ -233,7 +231,6 @@ FORM f4_tabname.
   ENDIF.
 ENDFORM.
 
-
 *----------------------------------------------------------------------*
 *  Include: ZFA25SAP23_AUTH
 *----------------------------------------------------------------------*
@@ -315,7 +312,6 @@ FORM exit_and_unlock .
   PERFORM unlock_current_table USING p_tab.
   LEAVE TO SCREEN 0.
 ENDFORM.
-
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_DDIC
@@ -856,7 +852,6 @@ FORM add_fc_tech_if_missing USING iv_field  TYPE lvc_fname
     APPEND gs_fieldcat TO gt_fieldcat.
   ENDIF.
 ENDFORM.
-
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_ALV
@@ -2790,7 +2785,6 @@ FORM build_excluding_toolbar.
 
 ENDFORM.
 
-
 *=====================================================================*
 * INCLUDE ZFA25SAP23_IO - Đọc / Upload dữ liệu Excel (.XLSX, .XLS)
 *=====================================================================*
@@ -4412,7 +4406,7 @@ FORM reorder_components_ref USING ir_table TYPE REF TO data
 
 ENDFORM.
 
- *&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_AUDIT (classic-syntax, no templates/inline)
 *&---------------------------------------------------------------------*
 
@@ -7204,7 +7198,7 @@ FORM check_newrec_duplicate_all
 
 ENDFORM.
 
-"===== ZFA25SAP23_DB =====
+ "===== ZFA25SAP23_DB =====
 
 " Tạo itab động dựa trên tên bảng
 FORM ensure_dyn_itab USING iv_tab TYPE tabname
@@ -8041,7 +8035,6 @@ FORM fallback_audit_fields CHANGING cs_row TYPE any.
 
 ENDFORM.
 
-
 "===== ZFA25SAP23_MAIN =====
 START-OF-SELECTION.
 
@@ -8089,6 +8082,7 @@ PERFORM reorder_audit_cols CHANGING gt_fieldcat.
 
 " 8. Gọi screen hiển thị ALV
 CALL SCREEN 100.
+
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_F01  (FINAL – multi-select rollback)
@@ -9068,4 +9062,3 @@ FORM json_to_friendly_string
     ev_string = iv_json. " Fallback
   ENDIF.
 ENDFORM.
-
