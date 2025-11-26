@@ -20,7 +20,7 @@ INCLUDE zfa25sap23_f01.     "FORM rollBack"
 "===== INCLUDE ZFA25SAP23_TOP =====
 " Global declarations dùng chung cho DB/ALV/MAIN
 
-CONSTANTS gc_hard_rcpt TYPE ad_smtpadr VALUE 'thanhchse171611@fpt.edu.vn'. " mail nhận cố định
+*CONSTANTS gc_hard_rcpt TYPE ad_smtpadr VALUE 'thanhchse171611@fpt.edu.vn'. " mail nhận cố định
 
 TYPE-POOLS: abap.
 CLASS lcl_alv_handler DEFINITION DEFERRED.
@@ -123,12 +123,14 @@ TYPES: zty_change_tab TYPE STANDARD TABLE OF zty_change WITH DEFAULT KEY.
 "=====================================================================
 
 
+
 "===== INCLUDE ZFA25SAP23_SEL =====
 
 " Khối tham số
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
   PARAMETERS:
-    p_tab    TYPE tabname OBLIGATORY, "Bảng Z*
+*    p_tab    TYPE tabname OBLIGATORY, "Bảng Z*
+    p_tab TYPE tabname,
     p_maxrow TYPE i DEFAULT 200.
 SELECTION-SCREEN END OF BLOCK b1.
 
@@ -149,6 +151,19 @@ FORM validate_tab.
   IF p_tab IS INITIAL.
     MESSAGE e398(00) WITH text-002.
   ENDIF.
+
+  "===== Kiểm tra bảng có tồn tại trong DDIC =====
+  SELECT SINGLE tabname
+    FROM dd02l
+    INTO @DATA(lv_exist)
+    WHERE tabname = @p_tab.
+
+  IF sy-subrc <> 0.
+    lv_msg = TEXT-150.   " Table &1 does not exist.
+    REPLACE '&1' IN lv_msg WITH p_tab.
+    MESSAGE e398(00) WITH lv_msg.
+  ENDIF.
+
 
   " Bảng phải là Z*, transparent, active
   SELECT SINGLE tabname
@@ -260,6 +275,45 @@ FORM has_actvt USING iv_act TYPE activ_auth CHANGING ev_ok TYPE abap_bool.
   IF sy-subrc = 0.
     ev_ok = abap_true.
   ENDIF.
+ENDFORM.
+
+FORM lock_current_table USING    iv_tab TYPE tabname
+                        CHANGING ev_ok  TYPE abap_bool.
+
+  ev_ok = abap_false.
+
+  CALL FUNCTION 'ENQUEUE_E_TABLE'
+    EXPORTING
+      tabname      = iv_tab
+    EXCEPTIONS
+      foreign_lock = 1
+      system_failure = 2
+      OTHERS       = 3.
+
+  CASE sy-subrc.
+    WHEN 0.
+      ev_ok = abap_true.
+    WHEN 1.
+      MESSAGE |Bảng { iv_tab } đang được người khác chỉnh sửa. Vui lòng chỉ mở dạng xem.| TYPE 'S' DISPLAY LIKE 'E'.
+    WHEN OTHERS.
+      MESSAGE |Không lock được bảng { iv_tab }.| TYPE 'S' DISPLAY LIKE 'E'.
+  ENDCASE.
+
+ENDFORM.
+
+
+FORM unlock_current_table USING iv_tab TYPE tabname.
+
+  CALL FUNCTION 'DEQUEUE_E_TABLE'
+    EXPORTING
+      tabname = iv_tab.
+
+ENDFORM.
+
+
+FORM exit_and_unlock .
+  PERFORM unlock_current_table USING p_tab.
+  LEAVE TO SCREEN 0.
 ENDFORM.
 
 
@@ -836,6 +890,7 @@ CLASS lcl_alv_handler IMPLEMENTATION.
           lv_can_change  TYPE abap_bool,
           lv_can_delete  TYPE abap_bool,
           lv_can_display TYPE abap_bool,
+          lv_can_history TYPE abap_bool,
           lv_drop        TYPE abap_bool,
           ix             TYPE sy-tabix.
 
@@ -846,6 +901,7 @@ CLASS lcl_alv_handler IMPLEMENTATION.
     PERFORM has_actvt USING '02' CHANGING lv_can_change.
     PERFORM has_actvt USING '06' CHANGING lv_can_delete.
     PERFORM has_actvt USING '03' CHANGING lv_can_display.
+    PERFORM has_actvt USING '03' CHANGING lv_can_history.
 
     e_interactive = space.
 
@@ -960,7 +1016,8 @@ CLASS lcl_alv_handler IMPLEMENTATION.
     ls_btn-icon       = icon_history.
     ls_btn-text       = 'History'.
     ls_btn-quickinfo  = 'View version history & rollback'.
-    ls_btn-disabled   = COND #( WHEN lv_can_display = abap_true THEN space ELSE 'X' ).
+*    ls_btn-disabled   = COND #( WHEN lv_can_display = abap_true THEN space ELSE 'X' ).
+    ls_btn-disabled   = COND #( WHEN gv_edit_md = abap_true AND lv_can_history = abap_true THEN space ELSE 'X' ).
     APPEND ls_btn TO lt_toolbar.
 
     e_object->mt_toolbar[] = lt_toolbar.
@@ -1451,6 +1508,7 @@ CLASS lcl_alv_handler IMPLEMENTATION.
             IMPORTING
               answer                = lv_ans_conf.
           IF lv_ans_conf <> '1'.
+           MESSAGE TEXT-149 TYPE 'S' DISPLAY LIKE 'E'.
             RETURN.
           ENDIF.
         ENDIF.
@@ -2772,10 +2830,27 @@ ct_header TYPE STANDARD TABLE.
   lv_file = iv_file.
 
   "--- Upload file Excel (.xlsx) dạng nhị phân ---
-  cl_gui_frontend_services=>gui_upload(
-  EXPORTING filename = lv_file filetype = 'BIN'
-  CHANGING data_tab = lt_bin ).
-
+*  cl_gui_frontend_services=>gui_upload(
+*  EXPORTING filename = lv_file filetype = 'BIN'
+*  CHANGING data_tab = lt_bin ).
+  CALL METHOD cl_gui_frontend_services=>gui_upload
+    EXPORTING
+      filename                = lv_file
+      filetype                = 'BIN'
+      read_by_line            = space
+    IMPORTING
+      filelength              = DATA(lv_len)
+    CHANGING
+      data_tab                = lt_bin
+    EXCEPTIONS
+      file_open_error         = 1
+      file_read_error         = 2
+      no_batch                = 3
+      gui_refuse_filetransfer = 4
+      invalid_type            = 5
+      no_authority            = 6
+      unknown_error           = 7
+      OTHERS                  = 8.
   IF sy-subrc <> 0.
 *    MESSAGE 'Không đọc được file .xlsx từ frontend' TYPE 'S' DISPLAY LIKE 'E'.
     MESSAGE TEXT-044 TYPE 'S' DISPLAY LIKE 'E'.
@@ -3069,33 +3144,33 @@ FORM upload_data_strict_match.
     MESSAGE TEXT-059 TYPE 'S' DISPLAY LIKE 'E'.
     RETURN.
   ENDIF.
-DATA lv_prev_row TYPE i VALUE 0.
-DATA lv_all_empty TYPE abap_bool.
+  DATA lv_prev_row TYPE i VALUE 0.
+  DATA lv_all_empty TYPE abap_bool.
 
 
-LOOP AT <lt_str> INTO DATA(ls_cell).
+  LOOP AT <lt_str> INTO DATA(ls_cell).
 
-  "=== Bỏ header row
-  IF ls_cell-row = 1.
-    CONTINUE.
-  ENDIF.
-
-  "=== Chỉ kiểm tra rỗng 1 lần cho 1 row Excel
-  IF lv_prev_row <> ls_cell-row.
-    lv_prev_row = ls_cell-row.
-
-    lv_all_empty = abap_true.
-    LOOP AT <lt_str> INTO DATA(ls_check) WHERE row = ls_cell-row.
-      IF ls_check-value IS NOT INITIAL.
-        lv_all_empty = abap_false.
-        EXIT.
-      ENDIF.
-    ENDLOOP.
-
-    IF lv_all_empty = abap_true.
-      CONTINUE. " ✅ skip toàn bộ row
+    "=== Bỏ header row
+    IF ls_cell-row = 1.
+      CONTINUE.
     ENDIF.
-  ENDIF.
+
+    "=== Chỉ kiểm tra rỗng 1 lần cho 1 row Excel
+    IF lv_prev_row <> ls_cell-row.
+      lv_prev_row = ls_cell-row.
+
+      lv_all_empty = abap_true.
+      LOOP AT <lt_str> INTO DATA(ls_check) WHERE row = ls_cell-row.
+        IF ls_check-value IS NOT INITIAL.
+          lv_all_empty = abap_false.
+          EXIT.
+        ENDIF.
+      ENDLOOP.
+
+      IF lv_all_empty = abap_true.
+        CONTINUE. " ✅ skip toàn bộ row
+      ENDIF.
+    ENDIF.
 *  LOOP AT <lt_str> INTO DATA(ls_cell) WHERE row > 1.
     READ TABLE lt_header INDEX ls_cell-col INTO DATA(lv_hdr_fieldname).
     IF sy-subrc <> 0.
@@ -3149,19 +3224,19 @@ LOOP AT <lt_str> INTO DATA(ls_cell).
 *    IF sy-subrc <> 0.
 *      APPEND INITIAL LINE TO <lt_upload> ASSIGNING <ls_data>.
 *    ENDIF.
-"=== Chuyển INDEX Excel → INDEX trong <lt_upload>
-DATA(lv_target_index) = lv_row - 1.
+    "=== Chuyển INDEX Excel → INDEX trong <lt_upload>
+    DATA(lv_target_index) = lv_row - 1.
 
-"=== Không map header row (row=1) và row lỗi
-IF lv_target_index <= 0.
-  CONTINUE.
-ENDIF.
+    "=== Không map header row (row=1) và row lỗi
+    IF lv_target_index <= 0.
+      CONTINUE.
+    ENDIF.
 
-"=== Tạo đúng 1 dòng tương ứng row Excel
-READ TABLE <lt_upload> INDEX lv_target_index ASSIGNING <ls_data>.
-IF sy-subrc <> 0.
-  APPEND INITIAL LINE TO <lt_upload> ASSIGNING <ls_data>.
-ENDIF.
+    "=== Tạo đúng 1 dòng tương ứng row Excel
+    READ TABLE <lt_upload> INDEX lv_target_index ASSIGNING <ls_data>.
+    IF sy-subrc <> 0.
+      APPEND INITIAL LINE TO <lt_upload> ASSIGNING <ls_data>.
+    ENDIF.
 
 
 
@@ -3891,7 +3966,6 @@ ENDIF.
 ENDFORM.
 
 
-
 FORM download_excel_xlsx USING ir_data TYPE REF TO data.
 
   FIELD-SYMBOLS: <lt_original> TYPE STANDARD TABLE,
@@ -4043,6 +4117,7 @@ FORM download_excel_xlsx USING ir_data TYPE REF TO data.
       RETURN.
   ENDTRY.
 
+
   " 4) Ghi ra frontend
   lt_bin = cl_bcs_convert=>xstring_to_solix( iv_xstring = lv_xstring ).
   cl_gui_frontend_services=>gui_download(
@@ -4066,6 +4141,7 @@ FORM download_excel_xlsx USING ir_data TYPE REF TO data.
   ENDIF.
 
 ENDFORM.
+
 *---------------------------------------------------------------------*
 * FORM download_template_xlsx - Export Excel Template
 *---------------------------------------------------------------------*
@@ -4142,6 +4218,11 @@ FORM download_template_xlsx.
       APPEND lv_field TO lt_remove.
     ENDIF.
   ENDLOOP.
+  " --- Luôn ẩn field MANDT nếu bảng có MANDT ---
+  READ TABLE lt_ddic WITH KEY fieldname = 'MANDT' TRANSPORTING NO FIELDS.
+  IF sy-subrc = 0.
+    APPEND 'MANDT' TO lt_remove.
+  ENDIF.
 
   IF lt_remove IS NOT INITIAL.
     PERFORM remove_components_from_ref USING lr_template lt_remove.
@@ -4331,8 +4412,7 @@ FORM reorder_components_ref USING ir_table TYPE REF TO data
 
 ENDFORM.
 
-
-*&---------------------------------------------------------------------*
+ *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_AUDIT (classic-syntax, no templates/inline)
 *&---------------------------------------------------------------------*
 
@@ -5150,7 +5230,7 @@ FORM on_save.
 
   " 7) Commit + clear NEWREC cho những dòng insert ok
   COMMIT WORK AND WAIT.
-
+  gv_in_upload = abap_false.
   DATA: lv_ins_cnt TYPE i,
         lv_upd_cnt TYPE i,
         lv_del_cnt TYPE i,          " có thể = 0 nếu DELE xử lý ở flow riêng
@@ -5217,12 +5297,14 @@ FORM on_save.
   DATA(lv_upd) = REDUCE i( INIT y = 0 FOR a IN gt_audit WHERE ( action = 'UPDATE' ) NEXT y = y + 1 ).
   DATA(lv_cnt) = lines( <lt_to_save> ).
 *  MESSAGE |Đã lưu { lv_cnt } dòng (INSERT={ lv_ins }, UPDATE={ lv_upd }) và quay về chế độ xem.| TYPE 'S'.
-  lv_msg = TEXT-093. "Đã lưu &1 dòng (INSERT=&2, UPDATE=&3) và quay về chế độ xem.
+  lv_msg = TEXT-093. "đã lưu &1 dòng ( insert=&2, update=&3) và quay về chế độ xem."
   REPLACE '&1' IN lv_msg WITH |{ lv_cnt }|.
   REPLACE '&2' IN lv_msg WITH |{ lv_ins }|.
   REPLACE '&3' IN lv_msg WITH |{ lv_upd }|.
   MESSAGE lv_msg TYPE 'S'.
 ENDFORM.
+
+
 
 
 *--------- delete ----------------------------
@@ -5593,9 +5675,9 @@ FORM rollback_from_log USING is_log TYPE zaudit_log.
   PERFORM ensure_keys USING is_log-tabname.
   IF gt_key_fields IS INITIAL.
 *    MESSAGE |Không tìm thấy key fields cho bảng { is_log-tabname }| TYPE 'S' DISPLAY LIKE 'E'.
-     lv_msg = TEXT-108. "Không tìm thấy key fields cho bảng &1
-  REPLACE '&1' IN lv_msg WITH is_log-tabname.
-  MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
+    lv_msg = TEXT-108. "Không tìm thấy key fields cho bảng &1
+    REPLACE '&1' IN lv_msg WITH is_log-tabname.
+    MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
     RETURN.
   ENDIF.
 
@@ -5661,78 +5743,95 @@ FORM rollback_from_log USING is_log TYPE zaudit_log.
     ls_new-before_json = lv_curr_json.
     ls_new-after_json  = lv_json.
 
+*    INSERT zaudit_log FROM ls_new.
+*    COMMIT WORK AND WAIT.
+*    gv_dirty = abap_false.
+*    DATA lv_subj TYPE so_obj_des.
+*    DATA lv_mail_rc TYPE i.
+*    lv_subj = |[RB OK] { is_log-tabname } LOG { lv_newlogid(8) }|.
+*    PERFORM send_mail_min USING lv_subj 'thanhchse171611@fpt.edu.vn'.
+*    lv_mail_rc = sy-subrc.
+*  ELSE.
+*    ROLLBACK WORK.
+*    MESSAGE lv_err TYPE 'S' DISPLAY LIKE 'E'.
+*  ENDIF.
+*ENDFORM.
+
     INSERT zaudit_log FROM ls_new.
     COMMIT WORK AND WAIT.
     gv_dirty = abap_false.
-    DATA lv_subj TYPE so_obj_des.
-    DATA lv_mail_rc TYPE i.
-    lv_subj = |[RB OK] { is_log-tabname } LOG { lv_newlogid(8) }|.
-    PERFORM send_mail_min USING lv_subj 'thanhchse171611@fpt.edu.vn'.
-    lv_mail_rc = sy-subrc.
+
+    PERFORM notify_rollback_smtp
+      USING ls_new          " Log record vừa insert (chứa LogID mới)
+            1               " Số dòng thay đổi (Rollback 1 dòng)
+            lv_curr_json    " Snapshot dữ liệu TRƯỚC khi rollback (để so sánh)
+            lv_json         " Snapshot dữ liệu SAU khi rollback (để so sánh)
+            ''.             " Ghi chú (để trống)
+
   ELSE.
     ROLLBACK WORK.
     MESSAGE lv_err TYPE 'S' DISPLAY LIKE 'E'.
   ENDIF.
 ENDFORM.
 
-*---------------------------------------------------------------------*
-* Gửi mail tối giản (raw)
-*---------------------------------------------------------------------*
-FORM send_mail_min USING iv_subject TYPE so_obj_des
-iv_to TYPE ad_smtpadr.
-  DATA: lo_req      TYPE REF TO cl_bcs,
-        lo_doc      TYPE REF TO cl_document_bcs,
-        lo_rcpt     TYPE REF TO if_recipient_bcs,
-        lt_text     TYPE bcsy_text,
-        ls_line     LIKE LINE OF lt_text,
-        lv_to_local TYPE ad_smtpadr.
-
-  lv_to_local = iv_to.
-  IF lv_to_local IS INITIAL.
-    lv_to_local = 'thanhchse171611@fpt.edu.vn'.
-  ENDIF.
-
-  CLEAR lt_text.
-  ls_line-line = |Rollback thành công từ { sy-repid } (user { sy-uname }).|.
-  APPEND ls_line TO lt_text.
-
-  TRY.
-      lo_req = cl_bcs=>create_persistent( ).
-      lo_doc = cl_document_bcs=>create_document(
-                 i_type    = 'RAW'
-                 i_text    = lt_text
-                 i_subject = iv_subject ).
-      lo_req->set_document( lo_doc ).
-      lo_req->set_sender( cl_sapuser_bcs=>create( sy-uname ) ).
-
-      " (A) TẮT thông báo trạng thái gửi (không nhận status mail/express)
-      lo_req->set_status_attributes(
-        i_requested_status = 'N'  " no MDN/status request
-        i_status_mail      = 'N'    " no status mail back to sender
-      ).
-
-      " (B) GỬI CHO BẠN VÀO SBWP NHƯNG KHÔNG EXPRESS (=> KHÔNG POPUP)
-      lo_req->add_recipient(
-        i_recipient = cl_sapuser_bcs=>create( sy-uname )
-        i_express   = abap_false ).
-
-      " (C) GỬI RA EMAIL INTERNET – cũng KHÔNG express
-      lo_rcpt = cl_cam_address_bcs=>create_internet_address( lv_to_local ).
-      lo_req->add_recipient(
-        i_recipient = lo_rcpt
-        i_express   = abap_false
-        i_copy      = abap_false
-        i_blind_copy = abap_false ).
-
-      lo_req->set_send_immediately( abap_true ).
-      lo_req->send( i_with_error_screen = abap_false ).
-      COMMIT WORK AND WAIT.
-      sy-subrc = 0.
-    CATCH cx_root.
-      sy-subrc = 4.
-  ENDTRY.
-
-ENDFORM.
+**---------------------------------------------------------------------*
+** Gửi mail tối giản (raw)
+**---------------------------------------------------------------------*
+*FORM send_mail_min USING iv_subject TYPE so_obj_des
+*iv_to TYPE ad_smtpadr.
+*  DATA: lo_req      TYPE REF TO cl_bcs,
+*        lo_doc      TYPE REF TO cl_document_bcs,
+*        lo_rcpt     TYPE REF TO if_recipient_bcs,
+*        lt_text     TYPE bcsy_text,
+*        ls_line     LIKE LINE OF lt_text,
+*        lv_to_local TYPE ad_smtpadr.
+*
+*  lv_to_local = iv_to.
+*  IF lv_to_local IS INITIAL.
+*    lv_to_local = 'thanhchse171611@fpt.edu.vn'.
+*  ENDIF.
+*
+*  CLEAR lt_text.
+*  ls_line-line = |Rollback thành công từ { sy-repid } (user { sy-uname }).|.
+*  APPEND ls_line TO lt_text.
+*
+*  TRY.
+*      lo_req = cl_bcs=>create_persistent( ).
+*      lo_doc = cl_document_bcs=>create_document(
+*                 i_type    = 'RAW'
+*                 i_text    = lt_text
+*                 i_subject = iv_subject ).
+*      lo_req->set_document( lo_doc ).
+*      lo_req->set_sender( cl_sapuser_bcs=>create( sy-uname ) ).
+*
+*      " (A) TẮT thông báo trạng thái gửi (không nhận status mail/express)
+*      lo_req->set_status_attributes(
+*        i_requested_status = 'N'  " no MDN/status request
+*        i_status_mail      = 'N'    " no status mail back to sender
+*      ).
+*
+*      " (B) GỬI CHO BẠN VÀO SBWP NHƯNG KHÔNG EXPRESS (=> KHÔNG POPUP)
+*      lo_req->add_recipient(
+*        i_recipient = cl_sapuser_bcs=>create( sy-uname )
+*        i_express   = abap_false ).
+*
+*      " (C) GỬI RA EMAIL INTERNET – cũng KHÔNG express
+*      lo_rcpt = cl_cam_address_bcs=>create_internet_address( lv_to_local ).
+*      lo_req->add_recipient(
+*        i_recipient = lo_rcpt
+*        i_express   = abap_false
+*        i_copy      = abap_false
+*        i_blind_copy = abap_false ).
+*
+*      lo_req->set_send_immediately( abap_true ).
+*      lo_req->send( i_with_error_screen = abap_false ).
+*      COMMIT WORK AND WAIT.
+*      sy-subrc = 0.
+*    CATCH cx_root.
+*      sy-subrc = 4.
+*  ENDTRY.
+*
+*ENDFORM.
 
 *---------------------------------------------------------------------*
 * Restore data từ JSON (dùng cho rollback)
@@ -5833,21 +5932,36 @@ ENDFORM.
 *---------------------------------------------------------------------*
 * Gửi mail cho manager
 *---------------------------------------------------------------------*
+*FORM get_manager_for_tab
+*  USING    iv_tabname       TYPE tabname
+*  CHANGING ev_manager_user  TYPE syuname
+*           ev_manager_email TYPE ad_smtpadr.
+*
+*  CLEAR: ev_manager_user.
+*  CLEAR: ev_manager_email.
+*
+*  SELECT SINGLE
+*         manager_uname,
+*         manager_email
+*    FROM ztab_manager
+*    WHERE tabname = @iv_tabname
+*      AND ( active = 'X' OR active IS INITIAL )
+*    INTO (@ev_manager_user, @ev_manager_email).
+*
+*ENDFORM.
+
 FORM get_manager_for_tab
-  USING    iv_tabname       TYPE tabname
-  CHANGING ev_manager_user  TYPE syuname
-           ev_manager_email TYPE ad_smtpadr.
+  USING    iv_tabname  TYPE tabname
+  CHANGING ct_managers TYPE string_table. " Dùng string_table để tương thích
 
-  CLEAR: ev_manager_user.
-  CLEAR: ev_manager_email.
+  CLEAR ct_managers.
 
-  SELECT SINGLE
-         manager_uname,
-         manager_email
+  " Lỗi 1: Đưa INTO TABLE xuống cuối cùng
+  SELECT manager_email
     FROM ztab_manager
     WHERE tabname = @iv_tabname
       AND ( active = 'X' OR active IS INITIAL )
-    INTO (@ev_manager_user, @ev_manager_email).
+    INTO TABLE @ct_managers.
 
 ENDFORM.
 
@@ -5861,37 +5975,24 @@ FORM notify_rollback_smtp
         iv_prev_json TYPE zde_json_txt
         iv_note      TYPE string.
 
-  DATA: lv_manager_user  TYPE syuname,
-        lv_manager_email TYPE ad_smtpadr,
-        lv_to            TYPE ad_smtpadr.
+  DATA: lt_emails TYPE string_table. " Dùng bảng string
 
-  " 1) Lấy manager theo bảng
-  PERFORM get_manager_for_tab
+  " 1) Lấy danh sách người nhận
+  PERFORM get_notify_recipient
     USING    is_log-tabname
-    CHANGING lv_manager_user
-             lv_manager_email.
+    CHANGING lt_emails.
 
-  " 2) Quy tắc chọn người nhận
-  IF lv_manager_email IS NOT INITIAL.
-    lv_to = lv_manager_email.               " gửi cho manager (email)
-  ELSE.
-    lv_to = 'thanhchse171611@fpt.edu.vn'.   " fallback của bạn
-  ENDIF.
-
-  " 3) Gọi đúng FORM đã build HTML & gửi mail sẵn
-  "    CHÚ Ý: send_mail_rb_detail có thứ tự:
-  "    (tab, logid, rows, to, json_curr, json_after, note)
+  " 2) Gọi form gửi mail chi tiết
   PERFORM send_mail_rb_detail
     USING is_log-tabname        " iv_tab
           is_log-logid          " iv_logid
           iv_mod                " iv_rows
-          lv_to                 " iv_to
+          lt_emails             " <--- Truyền bảng email
           iv_curr_json          " iv_json_curr
           iv_prev_json          " iv_json_after
           iv_note               " iv_note
-          ''                    " iv_subject_override (để trống -> dùng subject rollback mặc định)
-          ''.                   " iv_html_override    (để trống -> build body rollback mặc định)
-
+          ''                    " iv_subject_override
+          ''.                   " iv_html_override
 
 ENDFORM.
 
@@ -5901,39 +6002,34 @@ ENDFORM.
 * Gửi mail rollback chi tiết (HTML) – có hỗ trợ override cho SAVE
 *---------------------------------------------------------------------*
 FORM send_mail_rb_detail
-  USING iv_tab               TYPE tabname
-        iv_logid             TYPE zaudit_log-logid
-        iv_rows              TYPE i
-        iv_to                TYPE ad_smtpadr
-        iv_json_curr         TYPE zde_json_txt
-        iv_json_after        TYPE zde_json_txt
-        iv_note              TYPE string
-        iv_subject_override  TYPE so_obj_des
-        iv_html_override     TYPE string.
+  USING iv_tab              TYPE tabname
+        iv_logid            TYPE zaudit_log-logid
+        iv_rows             TYPE i
+        it_to               TYPE string_table
+        iv_json_curr        TYPE zde_json_txt
+        iv_json_after       TYPE zde_json_txt
+        iv_note             TYPE string
+        iv_subject_override TYPE so_obj_des
+        iv_html_override    TYPE string.
 
-  DATA: lo_req      TYPE REF TO cl_bcs,
-        lo_doc      TYPE REF TO cl_document_bcs,
-        lo_rcpt     TYPE REF TO if_recipient_bcs,
-        lo_rcptso   TYPE REF TO if_recipient_bcs,
-        lt_body     TYPE bcsy_text,
-        lv_subj     TYPE so_obj_des,
-        lv_html     TYPE string,
-*        lv_curr_html  TYPE string,
-*        lv_after_html TYPE string,
-        lv_to_local TYPE ad_smtpadr.
+  DATA: lo_req    TYPE REF TO cl_bcs,
+        lo_doc    TYPE REF TO cl_document_bcs,
+        lo_rcpt   TYPE REF TO if_recipient_bcs,
+        lo_rcptso TYPE REF TO if_recipient_bcs,
+        lt_body   TYPE bcsy_text,
+        lv_subj   TYPE so_obj_des,
+        lv_html   TYPE string,
+        lt_emails TYPE string_table,
+        lv_email  TYPE string.
 
-  " Resolve người nhận
-  lv_to_local = iv_to.
-  IF lv_to_local IS INITIAL.
-    " TODO: thay bằng hằng gc_hard_rcpt nếu bạn đã khai báo trong TOP
-    lv_to_local = 'thanhchse171611@fpt.edu.vn'.
+  " Resolve người nhận: Copy từ tham số vào biến local
+  lt_emails = it_to.
+
+  " Nếu danh sách rỗng -> Thêm email mặc định (Fallback)
+  IF lt_emails IS INITIAL.
+    PERFORM get_manager_for_tab USING 'OWNER' CHANGING lt_emails.
   ENDIF.
 
-*  " Escape + cắt JSON (đề phòng trường hợp dùng build mặc định)
-*  PERFORM _html_escape     USING iv_json_curr  CHANGING lv_curr_html.
-*  PERFORM _html_escape     USING iv_json_after CHANGING lv_after_html.
-*  PERFORM _ellipsize_html  USING lv_curr_html  8000 CHANGING lv_curr_html.
-*  PERFORM _ellipsize_html  USING lv_after_html 8000 CHANGING lv_after_html.
 
   " Subject: ưu tiên override (dùng cho SAVE); nếu rỗng -> subject rollback mặc định
   IF iv_subject_override IS NOT INITIAL.
@@ -5943,10 +6039,7 @@ FORM send_mail_rb_detail
   ENDIF.
 
   " Body HTML:
-  " - Nếu caller truyền iv_html_override (SAVE) -> dùng nguyên xi
-  " - Ngược lại -> build mặc định cho rollback (meta + note + diff)
   IF iv_html_override IS INITIAL.
-
     " Header + meta (rollback)
     lv_html =
       |<html><head><meta charset="utf-8"></head>| &&
@@ -5963,30 +6056,12 @@ FORM send_mail_rb_detail
       |<tr><td style="padding:4px 8px;vertical-align:top"><b>Thời gian</b></td><td style="padding:4px 8px;vertical-align:top">{ sy-datum } { sy-uzeit }</td></tr>| &&
       |</table></div>|.
 
-*    " NOTE (batch details) nếu có
-*    IF iv_note IS NOT INITIAL.
-*      DATA(lv_note_html) = iv_note.
-*      PERFORM _html_escape     USING lv_note_html CHANGING lv_note_html.
-*      PERFORM _ellipsize_html  USING lv_note_html 4000 CHANGING lv_note_html.
-*      lv_html = lv_html &&
-*        |<div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:12px 0">| &&
-*        |<h4 style="margin:0 0 8px 0;font-size:14px">Batch details</h4>| &&
-*        |<pre style="white-space:pre-wrap;font-family:Consolas,Menlo,monospace;font-size:12px;margin:0">| &&
-*        lv_note_html &&
-*        |</pre></div>|.
-*    ENDIF.
-
     " Diff HTML
     DATA lv_diff_html TYPE string.
-*    PERFORM build_html_diff USING    iv_tab
-*                                     lv_curr_html
-*                                     lv_after_html
-*                            CHANGING lv_diff_html.
-
     PERFORM build_html_diff USING    iv_tab
-                                 iv_json_curr
-                                 iv_json_after
-                        CHANGING lv_diff_html.
+                                     iv_json_curr
+                                     iv_json_after
+                            CHANGING lv_diff_html.
     lv_html = lv_html && lv_diff_html && |</body></html>|.
 
   ELSE.
@@ -6018,13 +6093,23 @@ FORM send_mail_rb_detail
         i_recipient = lo_rcptso
         i_express   = abap_false ).
 
-      " Email Internet: người nhận chính, không express/cc/bcc
-      lo_rcpt = cl_cam_address_bcs=>create_internet_address( lv_to_local ).
-      lo_req->add_recipient(
-        i_recipient  = lo_rcpt
-        i_express    = abap_false
-        i_copy       = abap_false
-        i_blind_copy = abap_false ).
+      " <--- [3] VÒNG LẶP THÊM NHIỀU NGƯỜI NHẬN --->
+      LOOP AT lt_emails INTO lv_email.
+        IF lv_email IS NOT INITIAL.
+          TRY.
+              lo_rcpt = cl_cam_address_bcs=>create_internet_address( CONV #( lv_email ) ).
+              lo_req->add_recipient(
+                i_recipient  = lo_rcpt
+                i_express    = abap_false
+                i_copy       = abap_false
+                i_blind_copy = abap_false ).
+            CATCH cx_root.
+              " Nếu 1 email lỗi định dạng, bỏ qua và tiếp tục người sau
+              CONTINUE.
+          ENDTRY.
+        ENDIF.
+      ENDLOOP.
+      " <--- KẾT THÚC VÒNG LẶP --->
 
       lo_req->set_send_immediately( abap_true ).
       lo_req->send( i_with_error_screen = abap_false ).
@@ -6041,25 +6126,27 @@ ENDFORM.
 *---------------------------------------------------------------------*
 FORM get_notify_recipient
   USING    iv_tabname TYPE tabname
-  CHANGING ev_to      TYPE ad_smtpadr.
+  CHANGING ct_to      TYPE string_table.
 
-  DATA: lv_owner_to TYPE ad_smtpadr,
-        lv_mgr_u    TYPE syuname,
-        lv_mgr_to   TYPE ad_smtpadr.
+  DATA: lt_managers TYPE string_table.
 
-  CLEAR: ev_to, lv_owner_to, lv_mgr_u, lv_mgr_to.
+  CLEAR ct_to.
 
-  " Manager map từ ztab_manager
-  PERFORM get_manager_for_tab USING iv_tabname CHANGING lv_mgr_u lv_mgr_to.
+  " --- BƯỚC 1: Tìm Manager cấu hình riêng cho bảng này ---
+  PERFORM get_manager_for_tab USING iv_tabname CHANGING lt_managers.
 
-  IF lv_owner_to IS NOT INITIAL.
-    ev_to = lv_owner_to.
-  ELSEIF lv_mgr_to IS NOT INITIAL.
-    ev_to = lv_mgr_to.
+  IF lt_managers IS NOT INITIAL.
+    " Nếu tìm thấy manager riêng -> Dùng luôn
+    APPEND LINES OF lt_managers TO ct_to.
   ELSE.
-    ev_to = gc_hard_rcpt.  " hằng fallback đã khai trong TOP
-  ENDIF.
+    " --- BƯỚC 2: Nếu không có, tìm cấu hình Mặc định (Key = 'DEFAULT') ---
+    PERFORM get_manager_for_tab USING 'OWNER' CHANGING lt_managers.
 
+    IF lt_managers IS NOT INITIAL.
+
+      APPEND LINES OF lt_managers TO ct_to.
+    ENDIF.
+  ENDIF.
 ENDFORM.
 
 
@@ -6078,25 +6165,21 @@ FORM notify_save_smtp
 
   DATA: lv_subject  TYPE so_obj_des,
         lv_html     TYPE string,
-        lv_to       TYPE ad_smtpadr,
+        lt_emails   TYPE string_table, " <-- Dùng bảng
         lv_rows     TYPE i,
         lv_cnt      TYPE i VALUE 0,
-        lv_max_rows TYPE i VALUE 50. " giới hạn số record hiển thị chi tiết
+        lv_max_rows TYPE i VALUE 50.
 
-  " 0) Không thay đổi -> thôi
   lv_rows = iv_ins + iv_upd + iv_del.
-  IF lv_rows = 0.
-    RETURN.
-  ENDIF.
+  IF lv_rows = 0. RETURN. ENDIF.
 
-  " 1) Người nhận (tạm fallback; nếu có mapping thì thay vào đây)
-*  lv_to = gc_hard_rcpt.
-  PERFORM get_notify_recipient USING iv_tabname CHANGING lv_to.
+  " 1) Lấy người nhận
+  PERFORM get_notify_recipient USING iv_tabname CHANGING lt_emails.
 
-  " 2) Subject override cho SAVE
+  " 2) Subject override
   lv_subject = |[SAVE] { iv_tabname }|.
 
-  " 3) Header + summary
+  " 3) Header + summary (Giữ nguyên logic HTML cũ của bạn)
   lv_html =
     |<html><head><meta charset="utf-8"></head>| &&
     |<body style="font-family:Arial,sans-serif;font-size:13px;color:#111;margin:0;padding:16px;background:#fafafa">| &&
@@ -6111,39 +6194,23 @@ FORM notify_save_smtp
     |<p style="margin:0"><b>Tổng kết:</b> +{ iv_ins } thêm, ~{ iv_upd } sửa, –{ iv_del } xóa</p>| &&
     |</div>|.
 
-  " 4) Chi tiết từng record: dùng JSON THÔ từ gt_audit -> build_html_diff
+  " 4) Chi tiết (Giữ nguyên logic cũ)
   FIELD-SYMBOLS <a> TYPE ty_audit.
   LOOP AT gt_audit ASSIGNING <a> WHERE tabname = iv_tabname.
     ADD 1 TO lv_cnt.
     IF lv_cnt > lv_max_rows.
-      lv_html = lv_html &&
-        |<div style="margin-top:8px;color:#6b7280;font-size:12px"><i>(Rút gọn… chỉ hiển thị { lv_max_rows } bản ghi đầu tiên)</i></div>|.
+      lv_html = lv_html && |<div style="margin-top:8px;color:#6b7280;font-size:12px"><i>(Rút gọn...)</i></div>|.
       EXIT.
     ENDIF.
-
     DATA(lv_diff_html) = VALUE string( ).
-    " LƯU Ý: truyền JSON thô (KHÔNG escape/cắt trước)
-    PERFORM build_html_diff USING    iv_tabname
-                                     <a>-before_json   " có thể rỗng với INSERT
-                                     <a>-after_json    " có thể rỗng với DELETE
-                            CHANGING lv_diff_html.
-
+    PERFORM build_html_diff USING iv_tabname <a>-before_json <a>-after_json CHANGING lv_diff_html.
     lv_html = lv_html && lv_diff_html.
   ENDLOOP.
-
   lv_html = lv_html && |</body></html>|.
 
-  " 5) Gửi mail dùng form rollback (subject/body override)
+  " 5) Gửi mail (Truyền lt_emails thay vì biến đơn)
   PERFORM send_mail_rb_detail
-    USING iv_tabname
-          space                 " iv_logid (SAVE không có -> SPACE)
-          lv_rows
-          lv_to
-          ''                    " iv_json_curr (không dùng khi override)
-          ''                    " iv_json_after
-          ''                    " iv_note
-          lv_subject            " override subject
-          lv_html.              " override body
+    USING iv_tabname space lv_rows lt_emails '' '' '' lv_subject lv_html.
 
 ENDFORM.
 
@@ -6158,28 +6225,22 @@ FORM notify_delete_smtp
 
   DATA: lv_subject  TYPE so_obj_des,
         lv_html     TYPE string,
-        lv_to       TYPE ad_smtpadr,
+        lt_emails   TYPE string_table, " <-- Dùng bảng
         lv_rows     TYPE i,
         lv_cnt      TYPE i VALUE 0,
         lv_max_rows TYPE i VALUE 50.
 
-  " Đếm số DELETE trong batch hiện tại
   lv_rows = REDUCE i( INIT x = 0 FOR a IN gt_audit
                       WHERE ( tabname = iv_tabname AND action = 'DELETE' )
                       NEXT x = x + 1 ).
-  IF lv_rows = 0.
-    RETURN.
-  ENDIF.
+  IF lv_rows = 0. RETURN. ENDIF.
 
-  " Người nhận (fallback; có mapping thì thay ở đây)
-*  lv_to = gc_hard_rcpt.
-  PERFORM get_notify_recipient USING iv_tabname CHANGING lv_to.
-  " PERFORM get_manager_for_tab USING iv_tabname CHANGING lv_to. " nếu có
+  " Lấy người nhận
+  PERFORM get_notify_recipient USING iv_tabname CHANGING lt_emails.
 
-  " Subject
-  lv_subject = |[DELETE] { iv_tabname } –{ lv_rows } by { sy-uname } at { sy-uzeit }|.
+  lv_subject = |[DELETE] { iv_tabname } – { lv_rows } rows|.
 
-  " Header + summary
+  " (Giữ nguyên phần build HTML Header + Summary của bạn...)
   lv_html =
     |<html><head><meta charset="utf-8"></head>| &&
     |<body style="font-family:Arial,sans-serif;font-size:13px;color:#111;margin:0;padding:16px;background:#fafafa">| &&
@@ -6194,30 +6255,19 @@ FORM notify_delete_smtp
     |<p style="margin:0"><b>Tổng kết:</b> –{ lv_rows } xóa</p>| &&
     |</div>|.
 
-  " Chi tiết từng record DELETE: dùng JSON thô (before có, after rỗng)
+  " Build chi tiết (rút gọn ví dụ)
   FIELD-SYMBOLS <a> TYPE ty_audit.
-  LOOP AT gt_audit ASSIGNING <a>
-       WHERE tabname = iv_tabname AND action = 'DELETE'.
-    ADD 1 TO lv_cnt.
-    IF lv_cnt > lv_max_rows.
-      lv_html = lv_html &&
-        |<div style="margin-top:8px;color:#6b7280;font-size:12px"><i>(Rút gọn… chỉ hiển thị { lv_max_rows } bản ghi đầu tiên)</i></div>|.
-      EXIT.
-    ENDIF.
-
+  LOOP AT gt_audit ASSIGNING <a> WHERE tabname = iv_tabname AND action = 'DELETE'.
+    " (Giữ nguyên code build diff...)
     DATA(lv_diff_html) = VALUE string( ).
-    PERFORM build_html_diff USING    iv_tabname
-                                     <a>-before_json   " JSON thô
-                                     ''                " after rỗng cho DELETE
-                            CHANGING lv_diff_html.
+    PERFORM build_html_diff USING iv_tabname <a>-before_json '' CHANGING lv_diff_html.
     lv_html = lv_html && lv_diff_html.
   ENDLOOP.
-
   lv_html = lv_html && |</body></html>|.
 
-  " Gửi (override subject/body)
+  " Gửi mail (Truyền lt_emails)
   PERFORM send_mail_rb_detail
-    USING iv_tabname space lv_rows lv_to '' '' '' lv_subject lv_html.
+    USING iv_tabname space lv_rows lt_emails '' '' '' lv_subject lv_html.
 
 ENDFORM.
 
@@ -6516,7 +6566,7 @@ FORM build_html_diff USING    iv_tab        TYPE tabname
   " Legend
   cv_html &&=
     |<div style="margin-top:8px;font-size:12px;color:#374151">|
- && |<b>{ lv_changed_total }</b> field(s) changed across records. |
+* && |<b>{ lv_changed_total }</b> field(s) changed across records. |
  && |<span style="display:inline-block;margin-left:8px;padding:2px 6px;background:#FEE2E2;color:#991B1B;border-radius:999px">Before changed</span>|
  && |<span style="display:inline-block;margin-left:6px;padding:2px 6px;background:#D1FAE5;color:#065F46;border-radius:999px">After changed</span>|
  && |</div>|.
@@ -7153,7 +7203,6 @@ FORM check_newrec_duplicate_all
   ENDLOOP.
 
 ENDFORM.
-
 
 "===== ZFA25SAP23_DB =====
 
@@ -8040,8 +8089,6 @@ PERFORM reorder_audit_cols CHANGING gt_fieldcat.
 
 " 8. Gọi screen hiển thị ALV
 CALL SCREEN 100.
-
-
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_F01  (FINAL – multi-select rollback)
@@ -9021,3 +9068,4 @@ FORM json_to_friendly_string
     ev_string = iv_json. " Fallback
   ENDIF.
 ENDFORM.
+
