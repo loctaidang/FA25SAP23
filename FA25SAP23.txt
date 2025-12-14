@@ -147,7 +147,7 @@ AT SELECTION-SCREEN.
 FORM validate_tab.
   " Chưa nhập
   IF p_tab IS INITIAL.
-    MESSAGE e398(00) WITH TEXT-002.
+    MESSAGE TEXT-002 TYPE 'E'.
   ENDIF.
 
   "===== Kiểm tra bảng có tồn tại trong DDIC =====
@@ -159,7 +159,7 @@ FORM validate_tab.
   IF sy-subrc <> 0.
     lv_msg = TEXT-150.   " Table &1 does not exist.
     REPLACE '&1' IN lv_msg WITH p_tab.
-    MESSAGE e398(00) WITH lv_msg.
+    MESSAGE lv_msg TYPE 'E'.
   ENDIF.
 
 
@@ -176,7 +176,7 @@ FORM validate_tab.
 
     lv_msg = TEXT-003.
     REPLACE '&1' IN lv_msg WITH p_tab.
-    MESSAGE e398(00) WITH lv_msg.
+    MESSAGE lv_msg TYPE 'E'.
 
 
 *    MESSAGE e398(00) WITH |Bảng { p_tab } không hợp lệ (chỉ Z* active).|.
@@ -187,7 +187,7 @@ ENDFORM.
 FORM validate_maxrow.
   IF p_maxrow IS INITIAL OR p_maxrow <= 0.
 *    MESSAGE e398(00) WITH 'p_maxrow phải > 0'.
-    MESSAGE e398(00) WITH TEXT-004.
+    MESSAGE TEXT-004 TYPE 'E'.
 
   ENDIF.
 ENDFORM.
@@ -344,7 +344,8 @@ FORM build_fieldcat USING p_field p_text.
   APPEND gs_fieldcat TO gt_fieldcat.
 ENDFORM.
 
-FORM build_fieldcat_all .
+FORM build_fieldcat_all.
+
   REFRESH: gt_fieldcat, gt_fieldnames.
 
   "--- Lấy fieldcatalog từ DDIC
@@ -357,16 +358,13 @@ FORM build_fieldcat_all .
       inconsistent_interface = 1
       program_error          = 2
       OTHERS                 = 3.
-
+IF sy-subrc <> 0.
+  " Error handling logic (đã có sẵn ở đoạn check gt_fieldcat bên dưới, nhưng SLIN cần dòng IF này)
+ENDIF.
   IF gt_fieldcat IS INITIAL.
-*    MESSAGE |Không tạo được fieldcatalog cho bảng { p_tab }| TYPE 'S' DISPLAY LIKE 'E'.
-
-
     lv_msg = TEXT-005.
     REPLACE '&1' IN lv_msg WITH p_tab.
-
     MESSAGE lv_msg TYPE 'S' DISPLAY LIKE 'E'.
-
     RETURN.
   ENDIF.
 
@@ -385,170 +383,111 @@ FORM build_fieldcat_all .
 
   DESCRIBE TABLE gt_fieldcat LINES lv_colpos.
 
-  " ERDAT
-  READ TABLE gt_fieldcat WITH KEY fieldname = 'ERDAT' TRANSPORTING NO FIELDS.
-  IF sy-subrc <> 0.
-    CLEAR ls_fc.
-    ls_fc-fieldname = 'ERDAT'.
-*    ls_fc-coltext   = 'Created On'.
-    ls_fc-coltext   = TEXT-182.
-*    ls_fc-scrtext_m = 'Created On'.
-    ls_fc-scrtext_m = TEXT-182.
-*    ls_fc-reptext   = 'Created On'.
-    ls_fc-reptext   = TEXT-182.
-*    ls_fc-seltext   = 'Created On'.
-    ls_fc-seltext   = TEXT-182.
-    ls_fc-col_pos   = lv_colpos + 1.
-    APPEND ls_fc TO gt_fieldcat.
-  ENDIF.
+  DATA(lv_next_pos) = lv_colpos + 1.
 
-  " ERTIM
-  READ TABLE gt_fieldcat WITH KEY fieldname = 'ERTIM' TRANSPORTING NO FIELDS.
-  IF sy-subrc <> 0.
-    CLEAR ls_fc.
-    ls_fc-fieldname = 'ERTIM'.
-*    ls_fc-coltext   = 'Created Time'.
-    ls_fc-coltext   = TEXT-183.
-*    ls_fc-scrtext_m = 'Created Time'.
-    ls_fc-scrtext_m = TEXT-183.
-*    ls_fc-reptext   = 'Created Time'.
-    ls_fc-reptext   = TEXT-183.
-*    ls_fc-seltext   = 'Created Time'.
-    ls_fc-seltext   = TEXT-183.
-    ls_fc-col_pos   = lv_colpos + 2.
-    APPEND ls_fc TO gt_fieldcat.
-  ENDIF.
+  DEFINE _add_audit_col.
+    READ TABLE gt_fieldcat WITH KEY fieldname = &1 TRANSPORTING NO FIELDS.
+    IF sy-subrc <> 0.
+      CLEAR ls_fc.
+      ls_fc-fieldname   = &1.
+      ls_fc-coltext     = &2.
+      ls_fc-scrtext_m   = &2.
+      ls_fc-reptext     = &2.
+      ls_fc-seltext     = &2.
+      ls_fc-col_pos     = lv_next_pos.
+      lv_next_pos       = lv_next_pos + 1.
+      APPEND ls_fc TO gt_fieldcat.
+    ENDIF.
+  END-OF-DEFINITION.
 
-  " ERNAM
-  READ TABLE gt_fieldcat WITH KEY fieldname = 'ERNAM' TRANSPORTING NO FIELDS.
-  IF sy-subrc <> 0.
-    CLEAR ls_fc.
-    ls_fc-fieldname = 'ERNAM'.
-*    ls_fc-coltext   = 'Created By'.
-    ls_fc-coltext   = TEXT-184.
-*    ls_fc-scrtext_m = 'Created By'.
-    ls_fc-scrtext_m = TEXT-184.
-*    ls_fc-reptext   = 'Created By'.
-    ls_fc-reptext   = TEXT-184.
-*    ls_fc-seltext   = 'Created By'.
-    ls_fc-seltext  = TEXT-184.
-    ls_fc-col_pos   = lv_colpos + 3.
-    APPEND ls_fc TO gt_fieldcat.
-  ENDIF.
+  _add_audit_col 'ERDAT' TEXT-182.
+  _add_audit_col 'ERTIM' TEXT-183.
+  _add_audit_col 'ERNAM' TEXT-184.
+  _add_audit_col 'AEDAT' TEXT-185.
+  _add_audit_col 'AETIM' TEXT-186.
+  _add_audit_col 'AENAM' TEXT-187.
 
-  " AEDAT
-  READ TABLE gt_fieldcat WITH KEY fieldname = 'AEDAT' TRANSPORTING NO FIELDS.
-  IF sy-subrc <> 0.
-    CLEAR ls_fc.
-    ls_fc-fieldname = 'AEDAT'.
-*    ls_fc-coltext   = 'Changed On'.
-*    ls_fc-scrtext_m = 'Changed On'.
-*    ls_fc-reptext   = 'Changed On'.
-*    ls_fc-seltext   = 'Changed On'.
-
-    ls_fc-coltext   = TEXT-185.
-    ls_fc-scrtext_m = TEXT-185.
-    ls_fc-reptext   = TEXT-185.
-    ls_fc-seltext   = TEXT-185.
-    ls_fc-col_pos   = lv_colpos + 4.
-    APPEND ls_fc TO gt_fieldcat.
-  ENDIF.
-
-  " AETIM
-  READ TABLE gt_fieldcat WITH KEY fieldname = 'AETIM' TRANSPORTING NO FIELDS.
-  IF sy-subrc <> 0.
-    CLEAR ls_fc.
-    ls_fc-fieldname = 'AETIM'.
-*    ls_fc-coltext   = 'Changed Time'.
-*    ls_fc-scrtext_m = 'Changed Time'.
-*    ls_fc-reptext   = 'Changed Time'.
-*    ls_fc-seltext   = 'Changed Time'.
-
-    ls_fc-coltext   = TEXT-186.
-    ls_fc-scrtext_m = TEXT-186.
-    ls_fc-reptext   = TEXT-186.
-    ls_fc-seltext   = TEXT-186.
-    ls_fc-col_pos   = lv_colpos + 5.
-    APPEND ls_fc TO gt_fieldcat.
-  ENDIF.
-
-  " AENAM
-  READ TABLE gt_fieldcat WITH KEY fieldname = 'AENAM' TRANSPORTING NO FIELDS.
-  IF sy-subrc <> 0.
-    CLEAR ls_fc.
-    ls_fc-fieldname = 'AENAM'.
-*    ls_fc-coltext   = 'Changed By'.
-*    ls_fc-scrtext_m = 'Changed By'.
-*    ls_fc-reptext   = 'Changed By'.
-*    ls_fc-seltext   = 'Changed By'.
-
-    ls_fc-coltext   = TEXT-187.
-    ls_fc-scrtext_m = TEXT-187.
-    ls_fc-reptext   = TEXT-187.
-    ls_fc-seltext   = TEXT-187.
-    ls_fc-col_pos   = lv_colpos + 6.
-    APPEND ls_fc TO gt_fieldcat.
-  ENDIF.
-
-  "--- Thêm field kỹ thuật CELLTAB (ẩn) nếu thiếu
+  "--- Thêm field kỹ thuật ẩn (CELLTAB, ROW_COLOR)
   READ TABLE gt_fieldcat WITH KEY fieldname = 'CELLTAB' TRANSPORTING NO FIELDS.
   IF sy-subrc <> 0.
     CLEAR ls_fc.
     ls_fc-fieldname = 'CELLTAB'.
-    ls_fc-col_pos   = 999.
-    ls_fc-no_out    = abap_true.
     ls_fc-tech      = abap_true.
-    ls_fc-inttype   = 'L'.
+    ls_fc-no_out    = abap_true.
     APPEND ls_fc TO gt_fieldcat.
   ENDIF.
 
-  "--- Thêm field kỹ thuật ROW_COLOR (ẩn) nếu thiếu
   READ TABLE gt_fieldcat WITH KEY fieldname = 'ROW_COLOR' TRANSPORTING NO FIELDS.
   IF sy-subrc <> 0.
     CLEAR ls_fc.
     ls_fc-fieldname = 'ROW_COLOR'.
-    ls_fc-col_pos   = 1000.
-    ls_fc-no_out    = abap_true.
     ls_fc-tech      = abap_true.
+    ls_fc-no_out    = abap_true.
     APPEND ls_fc TO gt_fieldcat.
   ENDIF.
 
-  "--- Force read-only cho các cột audit trên FIELDCAT
-  DATA: lt_audit_f TYPE STANDARD TABLE OF lvc_fname WITH DEFAULT KEY.
-  APPEND 'ERDAT' TO lt_audit_f.
-  APPEND 'ERTIM' TO lt_audit_f.
-  APPEND 'ERNAM' TO lt_audit_f.
-  APPEND 'AEDAT' TO lt_audit_f.
-  APPEND 'AETIM' TO lt_audit_f.
-  APPEND 'AENAM' TO lt_audit_f.
-
+  "--- **TỐI ƯU HÓA ĐỘ RỘNG CỘT – GENERIC, KHÔNG HARD-CODE FIELD**
   LOOP AT gt_fieldcat ASSIGNING <fs_fcat>.
-    READ TABLE lt_audit_f WITH KEY table_line = <fs_fcat>-fieldname TRANSPORTING NO FIELDS.
-    IF sy-subrc = 0.
-      CLEAR: <fs_fcat>-edit, <fs_fcat>-f4availabl.  " xám + không F4
+
+    "--- 1. Giới hạn độ rộng tối đa để tránh cột CHAR 50/132/255 quá rộng
+    IF <fs_fcat>-outputlen > 40.
+      <fs_fcat>-outputlen = 40.   " Tối đa 40 ký tự cho bất kỳ cột nào
     ENDIF.
+
+    "--- 2. Fix width chính xác cho các kiểu dữ liệu phổ biến
+    CASE <fs_fcat>-inttype.
+      WHEN 'D'. " DATS - ngày
+        <fs_fcat>-outputlen = 10.
+      WHEN 'T'. " TIMS - giờ
+        <fs_fcat>-outputlen = 8.
+      WHEN 'N' OR 'I' OR 'P'. " Số
+        IF <fs_fcat>-outputlen > 15.
+          <fs_fcat>-outputlen = 15.
+        ENDIF.
+    ENDCASE.
+
+    "--- 3. Fix width cố định cho các cột audit (dù có trong bảng gốc hay tự thêm)
+    CASE <fs_fcat>-fieldname.
+      WHEN 'ERDAT' OR 'AEDAT'.
+        <fs_fcat>-outputlen = 10.
+      WHEN 'ERTIM' OR 'AETIM'.
+        <fs_fcat>-outputlen = 8.
+      WHEN 'ERNAM' OR 'AENAM'.
+        <fs_fcat>-outputlen = 12.
+    ENDCASE.
+
+    "--- 4. Read-only cho cột audit
+    IF <fs_fcat>-fieldname = 'ERDAT' OR <fs_fcat>-fieldname = 'ERTIM' OR
+       <fs_fcat>-fieldname = 'ERNAM' OR <fs_fcat>-fieldname = 'AEDAT' OR
+       <fs_fcat>-fieldname = 'AETIM' OR <fs_fcat>-fieldname = 'AENAM'.
+      CLEAR: <fs_fcat>-edit, <fs_fcat>-f4availabl.
+    ENDIF.
+
   ENDLOOP.
 
-  "--- (Tuỳ chọn) Khử trùng lặp lần cuối nếu có
+  "--- Bật optimize tự động theo nội dung dữ liệu (rất quan trọng!)
+  gs_layout-cwidth_opt = 'X'.   " <--- Đây là chìa khóa để ALV tự co giãn đẹp
+
+  "--- (Tuỳ chọn) Loại bỏ trùng lặp fieldcat
   PERFORM dedup_fieldcat.
 
-  "--- Build danh sách caption để dùng nơi khác
+  "--- Build danh sách tên cột (dùng cho export, validate...)
   CLEAR gt_fieldnames.
   LOOP AT gt_fieldcat ASSIGNING <fs_fcat>.
     IF <fs_fcat>-tech = abap_true OR <fs_fcat>-no_out = abap_true.
       CONTINUE.
     ENDIF.
     DATA(lv_name) = COND string(
-                       WHEN <fs_fcat>-coltext IS NOT INITIAL
-                       THEN <fs_fcat>-coltext
-                       ELSE <fs_fcat>-fieldname ).
+      WHEN <fs_fcat>-coltext IS NOT INITIAL THEN <fs_fcat>-coltext
+      ELSE <fs_fcat>-fieldname ).
     lv_name = to_upper( condense( lv_name ) ).
     CONDENSE lv_name NO-GAPS.
     APPEND lv_name TO gt_fieldnames.
   ENDLOOP.
 
-  "--- Bật F4 (chuẩn hoặc fallback)
+  "--- Bật F4 nếu cần
   PERFORM enable_f4_in_fieldcat.
+
 ENDFORM.
 
 
@@ -771,6 +710,10 @@ FORM enable_f4_in_fieldcat .
     EXCEPTIONS
       OTHERS    = 1.
 
+  IF sy-subrc <> 0.
+  RETURN.
+ENDIF.
+
   FIELD-SYMBOLS <fc> TYPE lvc_s_fcat.
   LOOP AT gt_fieldcat ASSIGNING <fc>.
     IF <fc>-tech = abap_true OR <fc>-no_out = abap_true.
@@ -938,7 +881,7 @@ CLASS lcl_alv_handler IMPLEMENTATION.
     PERFORM has_actvt USING '06' CHANGING lv_can_delete.
     PERFORM has_actvt USING '03' CHANGING lv_can_display.
     PERFORM has_actvt USING '03' CHANGING lv_can_history.
-
+IF e_interactive IS INITIAL. ENDIF.
     e_interactive = space.
 
     " Gỡ nút chuẩn (dựa trên gt_tb_excl đã build ở PBO)
@@ -3045,6 +2988,9 @@ ENDFORM.
 *---------------------------------------------------------------------*
 * FORM upload_data_strict_match - Upload Excel → ALV data
 *---------------------------------------------------------------------*
+*---------------------------------------------------------------------*
+* FORM upload_data_strict_match - Upload Excel → ALV data
+*---------------------------------------------------------------------*
 FORM upload_data_strict_match.
   gv_in_upload = abap_false.  " 🔹 Đánh dấu đang upload
   TYPES: BEGIN OF alsmex_tabline,
@@ -3243,7 +3189,7 @@ FORM upload_data_strict_match.
   DATA lv_all_empty TYPE abap_bool.
 
 
-  LOOP AT <lt_str> INTO DATA(ls_cell).
+ LOOP AT <lt_str> INTO DATA(ls_cell).
 
     "=== Bỏ header row
     IF ls_cell-row = 1.
@@ -3266,106 +3212,110 @@ FORM upload_data_strict_match.
         CONTINUE. " ✅ skip toàn bộ row
       ENDIF.
     ENDIF.
-*  LOOP AT <lt_str> INTO DATA(ls_cell) WHERE row > 1.
+
     READ TABLE lt_header INDEX ls_cell-col INTO DATA(lv_hdr_fieldname).
     IF sy-subrc <> 0.
       CONTINUE.
     ENDIF.
-    "=== Chuẩn hóa tên field từ header Excel ===
-    DATA(lv_field_excel) = lv_hdr_fieldname.
-    TRANSLATE lv_field_excel TO UPPER CASE.
-    CONDENSE lv_field_excel NO-GAPS.
-    REPLACE ALL OCCURRENCES OF '_' IN lv_field_excel WITH ''.
-    CONDENSE lv_field_excel NO-GAPS.
 
+    "=========================================================================
+    " 1. Chuẩn hóa tên Header từ Excel (Xóa dấu gạch dưới để so sánh mềm)
+    "=========================================================================
+    DATA(lv_field_excel_norm) = lv_hdr_fieldname.
+    TRANSLATE lv_field_excel_norm TO UPPER CASE.
+    CONDENSE lv_field_excel_norm NO-GAPS.
+    REPLACE ALL OCCURRENCES OF '_' IN lv_field_excel_norm WITH ''.
+    CONDENSE lv_field_excel_norm NO-GAPS.
 
-    "=== Map tên field Excel sang field DDIC ===
-*    DATA(lv_real_field) = lv_fieldname.
-    DATA(lv_real_field) = lv_field_excel.
-    " Kiểm tra có trong danh sách field DDIC không
-    DATA(lv_in_ddic) = abap_false.
-    LOOP AT lt_ddic_fields INTO DATA(ls_check_field) WHERE fieldname = lv_real_field.
-      lv_in_ddic = abap_true.
-      EXIT.
+    "=========================================================================
+    " 2. [QUAN TRỌNG] Map ngược tên chuẩn hóa về tên Field thực tế trong DDIC
+    "=========================================================================
+    DATA: lv_final_fieldname TYPE fieldname.
+    CLEAR lv_final_fieldname.
+
+    LOOP AT lt_ddic_fields INTO DATA(ls_ddic_check).
+      " Chuẩn hóa tên field trong DDIC tương tự như Excel
+      DATA(lv_ddic_norm_check) = ls_ddic_check-fieldname.
+      TRANSLATE lv_ddic_norm_check TO UPPER CASE.
+      REPLACE ALL OCCURRENCES OF '_' IN lv_ddic_norm_check WITH ''.
+      CONDENSE lv_ddic_norm_check NO-GAPS.
+
+      " So sánh
+      IF lv_ddic_norm_check = lv_field_excel_norm.
+        lv_final_fieldname = ls_ddic_check-fieldname. " Lấy lại tên gốc (có _)
+        EXIT.
+      ENDIF.
     ENDLOOP.
 
-    READ TABLE gt_fieldnames TRANSPORTING NO FIELDS WITH KEY table_line = lv_real_field.
-
-    IF sy-subrc <> 0 AND lv_in_ddic = abap_false.
-      " Nếu header không tồn tại trong DDIC → bỏ qua cell này
+    " Nếu không tìm thấy field tương ứng trong cấu trúc bảng -> Bỏ qua cột này
+    IF lv_final_fieldname IS INITIAL.
       CONTINUE.
     ENDIF.
+
+    "=========================================================================
+    " 3. Xử lý tạo dòng mới
+    "=========================================================================
     DATA(lv_row) = ls_cell-row.
 
-    "=== Bỏ qua dòng header và dòng Excel trống ===
-    IF lv_row = 1.
-      CONTINUE. " Dòng tiêu đề
-    ENDIF.
-
-    "=== Chuyển INDEX Excel → INDEX trong <lt_upload>
+    " Chuyển INDEX Excel -> INDEX trong <lt_upload>
     DATA(lv_target_index) = lv_row - 1.
 
-    "=== Không map header row (row=1) và row lỗi
     IF lv_target_index <= 0.
       CONTINUE.
     ENDIF.
 
-    "=== Tạo đúng 1 dòng tương ứng row Excel
+    " Tạo đúng 1 dòng tương ứng row Excel
     READ TABLE <lt_upload> INDEX lv_target_index ASSIGNING <ls_data>.
     IF sy-subrc <> 0.
       APPEND INITIAL LINE TO <lt_upload> ASSIGNING <ls_data>.
     ENDIF.
 
-    ASSIGN COMPONENT lv_field_excel OF STRUCTURE <ls_data> TO <val>.
+    " Gán dữ liệu vào field thực tế
+    ASSIGN COMPONENT lv_final_fieldname OF STRUCTURE <ls_data> TO <val>.
 
-
+    "=========================================================================
+    " 4. Validate dữ liệu (Sửa lỗi biến LS_DDIC cũ)
+    "=========================================================================
     IF <val> IS ASSIGNED.
 
-      "-----------------------------------------------------------
-      " 🔹 [1] Lấy metadata field từ DDIC
-      "-----------------------------------------------------------
-      READ TABLE lt_ddic_fields INTO DATA(ls_ddic) WITH KEY fieldname = lv_field_excel.
+      " 🔹 [1] Lấy metadata field từ DDIC bằng tên CHUẨN (lv_final_fieldname)
+      READ TABLE lt_ddic_fields INTO DATA(ls_ddic) WITH KEY fieldname = lv_final_fieldname.
       IF sy-subrc <> 0.
         CONTINUE.
       ENDIF.
 
       DATA(lv_val_excel) = ls_cell-value.
-      "=== 🔧 Chuẩn hóa giá trị đặc biệt (ngày & giờ Excel trống hoặc 00000000) ===
+
+      "=== 🔧 Chuẩn hóa giá trị đặc biệt ===
       IF ls_ddic-inttype = 'D' AND ( lv_val_excel = '00000000' OR lv_val_excel = '0' ).
         CLEAR lv_val_excel.
       ENDIF.
       IF ls_ddic-inttype = 'T' AND ( lv_val_excel = '000000' OR lv_val_excel = '0' ).
         CLEAR lv_val_excel.
       ENDIF.
+
       DATA(lv_type) = ls_ddic-inttype.
       DATA(lv_valid) = abap_true.
 
-      "-----------------------------------------------------------
-      " 🔹 [2] Kiểm tra kiểu dữ liệu cơ bản (DATE, TIME, NUMERIC…)
-      "-----------------------------------------------------------
-      lv_valid = abap_true.
+      " 🔹 [2] Kiểm tra kiểu dữ liệu cơ bản
       CASE lv_type.
         WHEN 'D'. " Date
           IF lv_val_excel IS NOT INITIAL.
             TRY.
                 DATA(lv_date) = CONV d( lv_val_excel ).
-
                 CALL FUNCTION 'DATE_CHECK_PLAUSIBILITY'
                   EXPORTING
                     date                      = lv_date
                   EXCEPTIONS
                     plausibility_check_failed = 1
                     OTHERS                    = 2.
-
                 IF sy-subrc <> 0.
-                  lv_valid = abap_false. "
+                  lv_valid = abap_false.
                 ENDIF.
-
               CATCH cx_sy_conversion_error.
                 lv_valid = abap_false.
             ENDTRY.
           ENDIF.
-
 
         WHEN 'T'. " Time
           IF lv_val_excel IS NOT INITIAL.
@@ -3377,12 +3327,14 @@ FORM upload_data_strict_match.
                 lv_valid = abap_false.
             ENDTRY.
           ENDIF.
+
         WHEN 'I' OR 'P' OR 'F' OR 'INT1' OR 'INT2' OR 'INT4' OR 'DEC' OR 'CURR' OR 'QUAN'.
           TRY.
               lv_val_excel = lv_val_excel + 0.
             CATCH cx_sy_conversion_no_number cx_sy_conversion_error.
               lv_valid = abap_false.
           ENDTRY.
+
         WHEN 'N'. " NUMC
           lv_val_excel = condense( to_upper( lv_val_excel ) ).
           IF lv_val_excel IS NOT INITIAL AND NOT lv_val_excel CO '0123456789'.
@@ -3393,26 +3345,22 @@ FORM upload_data_strict_match.
           lv_valid = abap_true.
       ENDCASE.
 
-      " Nếu dữ liệu không hợp lệ theo kiểu DDIC → đánh dấu lỗi
+      " Nếu dữ liệu không hợp lệ -> Báo lỗi
       IF lv_valid = abap_false.
         ASSIGN COMPONENT 'IS_ERROR' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_err_flag>).
-        IF <lv_err_flag> IS ASSIGNED.
-          <lv_err_flag> = 'X'.
-        ENDIF.
+        IF <lv_err_flag> IS ASSIGNED. <lv_err_flag> = 'X'. ENDIF.
+
         ASSIGN COMPONENT 'IS_MESSAGE' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_err_msg>).
         IF <lv_err_msg> IS ASSIGNED.
-*          CONCATENATE 'Sai định dạng dữ liệu tại cột' lv_real_field ' giá trị:' lv_val_excel INTO <lv_err_msg> SEPARATED BY space.
           lv_msg = TEXT-060.
-          REPLACE '&1' IN lv_msg WITH lv_real_field.
+          REPLACE '&1' IN lv_msg WITH lv_final_fieldname. " Dùng tên field chuẩn
           REPLACE '&2' IN lv_msg WITH lv_val_excel.
           <lv_err_msg> = lv_msg.
         ENDIF.
         CONTINUE.
       ENDIF.
 
-      "-----------------------------------------------------------
-      " 🔹 [3] Kiểm tra giá trị hợp lệ theo DOMAIN (nếu có)
-      "-----------------------------------------------------------
+      " 🔹 [3] Kiểm tra Domain Values
       IF ls_ddic-domname IS NOT INITIAL.
         DATA(lt_dom_values) = VALUE dd07v_tab( ).
         CALL FUNCTION 'DD_DOMVALUES_GET'
@@ -3436,26 +3384,21 @@ FORM upload_data_strict_match.
 
           IF lv_value_found = abap_false.
             ASSIGN COMPONENT 'IS_ERROR' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_err_flag2>).
-            IF <lv_err_flag2> IS ASSIGNED.
-              <lv_err_flag2> = 'X'.
-            ENDIF.
+            IF <lv_err_flag2> IS ASSIGNED. <lv_err_flag2> = 'X'. ENDIF.
             CONTINUE.
           ENDIF.
         ENDIF.
       ENDIF.
 
-      "-----------------------------------------------------------
-      " 🔹 [4] Gán giá trị vào field nếu hợp lệ
-      "-----------------------------------------------------------
+      " 🔹 [4] Gán giá trị cuối cùng
       TRY.
           <val> = lv_val_excel.
         CATCH cx_sy_conversion_error.
           ASSIGN COMPONENT 'IS_ERROR' OF STRUCTURE <ls_data> TO FIELD-SYMBOL(<lv_err_flag3>).
-          IF <lv_err_flag3> IS ASSIGNED.
-            <lv_err_flag3> = 'X'.
-          ENDIF.
+          IF <lv_err_flag3> IS ASSIGNED. <lv_err_flag3> = 'X'. ENDIF.
           CONTINUE.
       ENDTRY.
+
     ENDIF.
   ENDLOOP.
 
@@ -4018,6 +3961,7 @@ FORM upload_data_strict_match.
 
 
 ENDFORM.
+
 
 
 FORM download_excel_xlsx USING ir_data TYPE REF TO data.
@@ -4844,7 +4788,9 @@ FORM check_key_on_add USING    iv_tab  TYPE tabname
       dfies_tab = lt_dfies
     EXCEPTIONS
       OTHERS    = 1.
-
+IF sy-subrc <> 0.
+  RETURN. " Nếu lỗi metadata thì không làm gì tiếp
+ENDIF.
   LOOP AT gt_key_fields ASSIGNING <fname>.
     ASSIGN COMPONENT <fname> OF STRUCTURE <ls> TO <comp>.
     IF sy-subrc <> 0 OR <comp> IS INITIAL.
@@ -5184,7 +5130,11 @@ FORM on_save.
         udate   = sy-datum
         utime   = sy-uzeit ).
       PERFORM to_json USING <ls_data> CHANGING ls_a_i-after_json.
-      CALL FUNCTION 'GUID_CREATE' IMPORTING ev_guid_32 = ls_a_i-logid.
+      TRY.
+    ls_a_i-logid = cl_system_uuid=>create_uuid_c32_static( ).
+  CATCH cx_uuid_error.
+    CLEAR ls_a_i-logid.
+ENDTRY.
       APPEND ls_a_i TO gt_audit.
 
       APPEND INITIAL LINE TO <lt_to_save> ASSIGNING <ls_to_save>.
@@ -5226,7 +5176,11 @@ FORM on_save.
           utime   = sy-uzeit ).
         PERFORM to_json USING <ls_old>  CHANGING ls_a_u-before_json.
         PERFORM to_json USING <ls_data> CHANGING ls_a_u-after_json.
-        CALL FUNCTION 'GUID_CREATE' IMPORTING ev_guid_32 = ls_a_u-logid.
+        TRY.
+    ls_a_u-logid = cl_system_uuid=>create_uuid_c32_static( ).
+  CATCH cx_uuid_error.
+    CLEAR ls_a_u-logid.
+ENDTRY.
         APPEND ls_a_u TO gt_audit.
 
         APPEND INITIAL LINE TO <lt_to_save> ASSIGNING <ls_to_save>.
@@ -5563,7 +5517,11 @@ FORM delete_selected USING    iv_tab TYPE tabname
       ls_a-udate   = sy-datum.
       ls_a-utime   = sy-uzeit.
       PERFORM to_json USING <wa_old> CHANGING ls_a-before_json.
-      CALL FUNCTION 'GUID_CREATE' IMPORTING ev_guid_32 = ls_a-logid.
+      TRY.
+    ls_a-logid = cl_system_uuid=>create_uuid_c32_static( ).
+  CATCH cx_uuid_error.
+    CLEAR ls_a-logid.
+ENDTRY.
       APPEND ls_a TO gt_audit.
 
       lv_deleted = lv_deleted + 1.
@@ -5684,6 +5642,7 @@ FORM show_audit_log_popup USING iv_tab TYPE tabname.
     EXPORTING
       i_title               = lv_msg
       i_zebra               = 'X'
+      i_tabname             = 'ZAUDIT_LOG'
       i_screen_start_column = 10
       i_screen_start_line   = 5
       i_screen_end_column   = 100
@@ -5817,7 +5776,11 @@ FORM rollback_from_log USING is_log TYPE zaudit_log.
   IF lv_err IS INITIAL.
     DATA: lv_newlogid TYPE char32,
           ls_new      TYPE zaudit_log.
-    CALL FUNCTION 'GUID_CREATE' IMPORTING ev_guid_32 = lv_newlogid.
+    TRY.
+    lv_newlogid = cl_system_uuid=>create_uuid_c32_static( ).
+  CATCH cx_uuid_error.
+    CLEAR lv_newlogid.
+ENDTRY.
 
     CLEAR ls_new.
     ls_new-mandt       = sy-mandt.
@@ -6301,7 +6264,7 @@ FORM notify_save_smtp
     |</table></div>| &&
     |<div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:12px 0">| &&
     |<p style="margin:0"><b>Result:</b> +{ iv_ins } Add, ~{ iv_upd } Edit, –{ iv_del } Delete</p>| &&
-    |</div>|.
+    |</div>| ##NO_TEXT.
 
   " 4) Chi tiết (Giữ nguyên logic cũ)
   FIELD-SYMBOLS <a> TYPE ty_audit.
@@ -6501,6 +6464,9 @@ FORM build_html_diff USING    iv_tab        TYPE tabname
       dfies_tab = lt_fieldinfo
     EXCEPTIONS
       OTHERS    = 1.
+  IF sy-subrc <> 0.
+  RETURN. " Nếu lỗi metadata thì không làm gì tiếp
+ENDIF.
   IF lt_fieldinfo IS INITIAL.
     cv_html = '<div style="padding:12px;border:1px solid #e5e7eb;border-radius:8px;background:#fff"><i>No DDIC field info for table.</i></div>'.
     RETURN.
@@ -6597,12 +6563,14 @@ FORM build_html_diff USING    iv_tab        TYPE tabname
     ENDIF.
 
     " — Title record
-    lv_title = |Record { lv_cnt } — KEY [{ lv_key }]|.
+" — Title record
+    lv_title = |Record { lv_cnt } — KEY [{ lv_key }]| ##NO_TEXT.
+
     lv_block =
       '<div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin:12px 0">'
    && |<div style="font-weight:600;font-size:14px;margin-bottom:10px">{ lv_title }</div>|
    && '<div style="overflow-x:auto">'
-   && '<table style="border-collapse:collapse;min-width:720px;font-family:Arial,sans-serif;font-size:12px">'.
+   && '<table style="border-collapse:collapse;min-width:720px;font-family:Arial,sans-serif;font-size:12px">' ##NO_TEXT.
 
     " — Header (nền tối, chữ trắng)
     lv_head =
@@ -8167,7 +8135,7 @@ START-OF-SELECTION.
 
   " Nếu có lỗi thật sự (SQL lỗi, bảng không tồn tại, v.v.)
   IF lv_err_main IS NOT INITIAL.
-    MESSAGE e398(00) WITH lv_err_main.
+    MESSAGE lv_err_main TYPE 'E'.
     RETURN.
   ENDIF.
 
@@ -8233,12 +8201,12 @@ FORM show_audit_history.
         lt_fieldcat  TYPE slis_t_fieldcat_alv,
         lt_fieldcat2 TYPE slis_t_fieldcat_alv,
         ls_fc        TYPE slis_fieldcat_alv,
-        ls_selfield  TYPE slis_selfield.
+        ls_selfield  TYPE slis_selfield ##NEEDED.
 
   DATA: lv_action TYPE zaudit_log-action,
         lv_title  TYPE c LENGTH 80,
         lv_msg    TYPE string,
-        lv_ans    TYPE c LENGTH 1.
+        lv_ans    TYPE c LENGTH 1 ##NEEDED.
 
   DATA: lt_picked    TYPE STANDARD TABLE OF ty_log_sel WITH DEFAULT KEY,
         lt_final     TYPE ty_t_log,
@@ -8246,7 +8214,7 @@ FORM show_audit_history.
         lt_seen_keys TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
         lv_keystr    TYPE string.
 
-  DATA: lv_skip_insert TYPE i VALUE 0,
+  DATA: lv_skip_insert TYPE i VALUE 0 ##NEEDED,
         lv_skip_empty  TYPE i VALUE 0,
         lv_conflicts   TYPE i VALUE 0,
         lv_cnt         TYPE i VALUE 0.
@@ -8764,9 +8732,11 @@ FORM perform_batch_rollback
 
   " Ghi 1 dòng audit gộp
   CLEAR ls_newlog.
-  CALL FUNCTION 'GUID_CREATE'
-    IMPORTING
-      ev_guid_32 = ls_newlog-logid.
+  TRY.
+      ls_newlog-logid = cl_system_uuid=>create_uuid_c32_static( ).
+    CATCH cx_uuid_error.
+      CLEAR ls_newlog-logid.
+  ENDTRY.
   ls_newlog-mandt       = sy-mandt.
   ls_newlog-uname       = sy-uname.
   ls_newlog-udate       = sy-datum.
@@ -8954,9 +8924,6 @@ FORM popup_confirm_rollback_text
 
 ENDFORM.
 
-
-
-
 *---------------------------------------------------------------------*
 * Reload dữ liệu và refresh ALV sau khi có thay đổi DB
 *---------------------------------------------------------------------*
@@ -8986,6 +8953,7 @@ FORM reload_after_change USING iv_tab TYPE tabname.
   PERFORM sync_fcat_with_itab CHANGING gt_fieldcat.
   PERFORM reorder_audit_cols   CHANGING gt_fieldcat.
 
+PERFORM sort_current_view_by_ddic_key.
   " 4) Reset mode + rebind ALV (không chỉ refresh)
   gv_add_mode     = abap_false.
   gv_edit_md      = abap_false.
@@ -8995,7 +8963,7 @@ FORM reload_after_change USING iv_tab TYPE tabname.
   IF g_alv_grid IS BOUND.
     TRY.
         g_alv_grid->set_ready_for_input( 0 ).
-      CATCH cx_root.
+      CATCH cx_root ##NO_HANDLER.
     ENDTRY.
 
     TRY.
@@ -9003,16 +8971,19 @@ FORM reload_after_change USING iv_tab TYPE tabname.
           EXPORTING is_layout       = gs_layout
           CHANGING  it_outtab       = <lt_data>
                     it_fieldcatalog = gt_fieldcat ).
-      CATCH cx_root.
+      CATCH cx_root ##NO_HANDLER.
         " Fallback: tối thiểu vẫn refresh nếu rebind lỗi
         DATA(ls_stbl) = VALUE lvc_s_stbl( row = 'X' col = 'X' ).
         g_alv_grid->refresh_table_display( EXPORTING is_stable = ls_stbl ).
     ENDTRY.
 
-    TRY. g_alv_grid->set_toolbar_interactive( ). CATCH cx_root. ENDTRY.
+    TRY. g_alv_grid->set_toolbar_interactive( ).
+    CATCH cx_root ##NO_HANDLER.
+      ENDTRY.
   ENDIF.
 
 ENDFORM.
+
 
 
 
@@ -9162,13 +9133,13 @@ FORM sort_current_view_by_ddic_key.
 ENDFORM.
 
 FORM resort_and_refresh_alv.
-  PERFORM sort_current_view_by_ddic_key.
+ PERFORM sort_current_view_by_ddic_key.
   IF g_alv_grid IS BOUND.
     TRY.
         g_alv_grid->refresh_table_display(
           EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
         g_alv_grid->set_toolbar_interactive( ).
-      CATCH cx_root.
+      CATCH cx_root ##NO_HANDLER.
     ENDTRY.
   ENDIF.
 ENDFORM.
@@ -9233,7 +9204,7 @@ FORM json_to_friendly_string
       IF sy-subrc <> 0. CONTINUE. ENDIF.
 
       " Lấy mô tả
-      READ TABLE lt_meta INTO DATA(ls_meta) WITH KEY fieldname = ls_comp-name.
+      READ TABLE lt_meta INTO DATA(ls_meta) WITH KEY fieldname = ls_comp-name ##WARN_OK.
       DATA(lv_desc) = ls_comp-name. " Fallback
       IF sy-subrc = 0.
         lv_desc = COND #( WHEN ls_meta-scrtext_m IS NOT INITIAL THEN ls_meta-scrtext_m
