@@ -882,15 +882,15 @@ CLASS lcl_alv_handler IMPLEMENTATION.
     PERFORM has_actvt USING '03' CHANGING lv_can_display.
     PERFORM has_actvt USING '03' CHANGING lv_can_history.
 IF e_interactive IS INITIAL. ENDIF.
-    e_interactive = space.
 
-    " Gỡ nút chuẩn (dựa trên gt_tb_excl đã build ở PBO)
+    " Lấy danh sách toolbar hiện tại
     lt_toolbar = e_object->mt_toolbar[].
 
+    " Bước 1: Duyệt và đánh dấu các nút cần xóa (Clear function code)
     LOOP AT lt_toolbar ASSIGNING <b>.
-      ix = sy-tabix.
       lv_drop = abap_false.
 
+      " Check 1: Nằm trong danh sách loại trừ gt_tb_excl
       LOOP AT gt_tb_excl ASSIGNING <fc>.
         IF <b>-function = <fc>.
           lv_drop = abap_true.
@@ -898,25 +898,27 @@ IF e_interactive IS INITIAL. ENDIF.
         ENDIF.
       ENDLOOP.
 
-      " Fallback
-      IF lv_drop = abap_false AND (
-       <b>-function = 'INSR' OR
-       <b>-function = 'APND' OR
-       <b>-function = 'DUPL' OR
-       <b>-function = 'DELE' OR
-       <b>-function = 'COPY' OR
-       <b>-function = 'PASTE' OR
-       <b>-function = 'SCUT' OR
-       <b>-function = 'SALL' OR
-       <b>-function = 'PICK'
-     ).
-        lv_drop = abap_true.
+      " Check 2: Fallback các mã chuẩn (đề phòng gt_tb_excl thiếu)
+      IF lv_drop = abap_false.
+        CASE <b>-function.
+          WHEN 'INSR' OR 'APND' OR 'DELE' OR 'DUPL'    " Thao tác dòng
+            OR 'COPY' OR 'PASTE' OR 'SCUT' OR 'UNDO'   " Clipbroad
+            OR '&LOCAL&INSERT_ROW' OR '&LOCAL&APPEND'  " Mã chuẩn ALV
+            OR '&LOCAL&DELETE_ROW' OR '&LOCAL&COPY_ROW'
+            OR '&LOCAL&PASTE_NEW_ROW' OR '&LOCAL&CUT'
+            OR '&LOCAL&UNDO'.
+            lv_drop = abap_true.
+        ENDCASE.
       ENDIF.
 
+      " Nếu cần xóa -> Xóa mã function code (đánh dấu)
       IF lv_drop = abap_true.
-        DELETE lt_toolbar INDEX ix.
+        CLEAR <b>-function.
       ENDIF.
     ENDLOOP.
+
+    " Bước 2: Xóa sạch các dòng đã đánh dấu ra khỏi bảng (An toàn tuyệt đối)
+    DELETE lt_toolbar WHERE function IS INITIAL.
 
     "=== 2) Thêm các nút custom (EVTG, SAVE, ADD, DELE, UPLD, XLSX, TMPL, HIST)
     "---- EVTG
@@ -2602,10 +2604,7 @@ FORM apply_editability_and_push.
   APPEND 'AETIM' TO lt_audit.
   APPEND 'AENAM' TO lt_audit.
 
-  " 1) Fieldcatalog (cấp cột)
-  "    - KEY: chỉ mở khi đang Add (dòng NEWREC)
-  "    - Non-key: mở khi Edit
-  "    - AUDIT: luôn đóng (edit = space, f4 = space)
+  " 1) Fieldcatalog (Cấp cột): Cấu hình Edit/F4 cơ bản
   FIELD-SYMBOLS: <fc> TYPE lvc_s_fcat.
   DATA: lv_is_key   TYPE abap_bool,
         lv_is_audit TYPE abap_bool.
@@ -2620,12 +2619,8 @@ FORM apply_editability_and_push.
     READ TABLE lt_audit WITH KEY table_line = <fc>-fieldname TRANSPORTING NO FIELDS.
     IF sy-subrc = 0.
       lv_is_audit = abap_true.
-    ENDIF.
-
-    IF lv_is_audit = abap_true.
       CLEAR: <fc>-edit, <fc>-f4availabl.
-      CLEAR: <fc>-ref_table, <fc>-ref_field.
-      CONTINUE. " bỏ qua các quyết định edit khác
+      CONTINUE.
     ENDIF.
 
     " Key / Non-key
@@ -2634,34 +2629,29 @@ FORM apply_editability_and_push.
     IF sy-subrc = 0. lv_is_key = abap_true. ENDIF.
 
     IF lv_is_key = abap_true.
-      " Logic cho khóa: Chỉ bật khi đang ADD MODE
+      " Key: Chỉ mở edit khi đang ADD
       IF gv_add_mode = abap_true.
-        <fc>-edit       = 'X'.
-        " Giữ nguyên trạng thái F4 đã bật ở enable_f4_in_fieldcat
+        <fc>-edit = 'X'.
       ELSE.
-        " Nếu không phải add mode -> Khóa xám -> Tắt luôn F4
-        CLEAR: <fc>-edit, <fc>-f4availabl.
+        CLEAR: <fc>-edit.
       ENDIF.
-
     ELSE.
-      " Logic cho cột thường (Non-key)
+      " Non-key: Mở edit khi Edit Mode
       IF gv_edit_md = abap_true.
         <fc>-edit = 'X'.
-        " Giữ nguyên trạng thái F4
       ELSE.
-        " Chế độ View -> Tắt edit -> Tắt luôn F4
-        CLEAR: <fc>-edit, <fc>-f4availabl.
+        CLEAR: <fc>-edit.
       ENDIF.
     ENDIF.
   ENDLOOP.
 
-  " 2) Style theo dòng (cấp ô)
-  "    - KEY enabled chỉ khi Add + dòng NEWREC = 'X'
-  "    - AUDIT luôn disabled
+  " 2) Style theo dòng (Cấp ô) -> Xử lý chi tiết từng trường hợp
+
   FIELD-SYMBOLS: <lt>      TYPE STANDARD TABLE,
                  <ls>      TYPE any,
                  <celltab> TYPE lvc_t_styl,
-                 <newrec>  TYPE any.
+                 <newrec>  TYPE any,
+                 <styl>    TYPE lvc_s_styl.
   DATA: ls_styl   TYPE lvc_s_styl,
         lv_key    TYPE dd03l-fieldname,
         lv_is_new TYPE abap_bool,
@@ -2672,47 +2662,67 @@ FORM apply_editability_and_push.
     LOOP AT <lt> ASSIGNING <ls>.
       ASSIGN COMPONENT 'CELLTAB' OF STRUCTURE <ls> TO <celltab>.
       IF sy-subrc <> 0. CONTINUE. ENDIF.
+
       CLEAR <celltab>.
 
-      " Dòng mới?
+      " Check dòng mới?
       lv_is_new = abap_false.
       ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <newrec>.
       IF sy-subrc = 0 AND <newrec> = 'X'. lv_is_new = abap_true. ENDIF.
 
-      " Khóa/mở cho KEY
+      " --- A. Xử lý Khóa/Mở nhập liệu cho KEY ---
       LOOP AT gt_key_fields INTO lv_key.
         CLEAR ls_styl.
         ls_styl-fieldname = lv_key.
         IF gv_add_mode = abap_true AND lv_is_new = abap_true.
-          ls_styl-style = cl_gui_alv_grid=>mc_style_enabled.     " cho nhập KEY ở dòng NEW
+          ls_styl-style = cl_gui_alv_grid=>mc_style_enabled.
         ELSE.
-          ls_styl-style = cl_gui_alv_grid=>mc_style_disabled.    " xám, không caret
+          ls_styl-style = cl_gui_alv_grid=>mc_style_disabled.
         ENDIF.
-
-        " Chỉ chèn nếu chưa có trong CELLTAB
-        READ TABLE <celltab> WITH KEY fieldname = ls_styl-fieldname style = ls_styl-style TRANSPORTING NO FIELDS.
-        IF sy-subrc <> 0.
-          INSERT ls_styl INTO TABLE <celltab>.
-        ENDIF.
+        INSERT ls_styl INTO TABLE <celltab>.
       ENDLOOP.
 
-      " Luôn khóa các cột audit
+      " --- B. Xử lý khóa Audit fields ---
       LOOP AT lt_audit INTO lv_af.
         CLEAR ls_styl.
         ls_styl-fieldname = lv_af.
         ls_styl-style     = cl_gui_alv_grid=>mc_style_disabled.
-
-        " Chỉ chèn nếu chưa có
-        READ TABLE <celltab> WITH KEY fieldname = ls_styl-fieldname style = ls_styl-style TRANSPORTING NO FIELDS.
+        " Insert nếu chưa có
+        READ TABLE <celltab> WITH KEY fieldname = ls_styl-fieldname TRANSPORTING NO FIELDS.
         IF sy-subrc <> 0.
           INSERT ls_styl INTO TABLE <celltab>.
         ENDIF.
       ENDLOOP.
+
+      " --- C. XỬ LÝ ẨN/HIỆN F4 ---
+      " Quy tắc:
+      " 1. View Mode: Ẩn tất cả F4.
+      " 2. Edit Mode + Dòng Cũ: Ẩn F4 của KEY (vì Key bị khóa), Hiện F4 của Non-Key.
+      " 3. Edit Mode + Dòng Mới: Hiện tất cả F4 (mặc định không cần style NO_F4).
+
+      IF gv_edit_md = abap_false.
+        " --- VIEW MODE: Ẩn hết F4 ---
+        LOOP AT gt_fieldcat ASSIGNING <fc> WHERE f4availabl = 'X'.
+          PERFORM add_style_no_f4 USING <fc>-fieldname CHANGING <celltab>.
+        ENDLOOP.
+
+      ELSEIF gv_edit_md = abap_true AND lv_is_new = abap_false.
+        " --- EDIT MODE (Dòng Cũ): Chỉ ẩn F4 của KEY ---
+        LOOP AT gt_key_fields INTO lv_key.
+           " Kiểm tra nếu field này có F4 thì mới cần ẩn
+           READ TABLE gt_fieldcat ASSIGNING <fc> WITH KEY fieldname = lv_key.
+           IF sy-subrc = 0 AND <fc>-f4availabl = 'X'.
+             PERFORM add_style_no_f4 USING lv_key CHANGING <celltab>.
+           ENDIF.
+        ENDLOOP.
+
+        " (Các cột Non-key sẽ tự động hiện F4 do không bị add style NO_F4)
+      ENDIF.
+
     ENDLOOP.
   ENDIF.
 
-  "=== 2b) Tô màu dòng NEWREC/không hợp lệ bằng ROW_COLOR ===
-  " Ưu tiên: INVALID (đỏ=6) > NEWREC (xanh=5)
+  " 2b) Tô màu dòng NEWREC (Xanh) / INVALID (Đỏ)
   FIELD-SYMBOLS: <upload_flag> TYPE any,
                  <valid_flag>  TYPE any,
                  <row_color>   TYPE lvc_t_scol.
@@ -2726,37 +2736,35 @@ FORM apply_editability_and_push.
     APPEND <fc>-fieldname TO lt_cols.
   ENDLOOP.
 
-  LOOP AT <lt> ASSIGNING <ls>.
-    ASSIGN COMPONENT 'ROW_COLOR' OF STRUCTURE <ls> TO <row_color>.
-    IF sy-subrc <> 0. CONTINUE. ENDIF.
+  IF <lt> IS ASSIGNED.
+    LOOP AT <lt> ASSIGNING <ls>.
+      ASSIGN COMPONENT 'ROW_COLOR' OF STRUCTURE <ls> TO <row_color>.
+      IF sy-subrc <> 0. CONTINUE. ENDIF.
 
-    ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <upload_flag>.
-    ASSIGN COMPONENT 'VALID'  OF STRUCTURE <ls> TO <valid_flag>.
+      ASSIGN COMPONENT 'NEWREC' OF STRUCTURE <ls> TO <upload_flag>.
+      ASSIGN COMPONENT 'VALID'  OF STRUCTURE <ls> TO <valid_flag>.
 
-    CLEAR lt_scol.
-
-    IF <valid_flag> IS ASSIGNED AND <valid_flag> IS INITIAL.
-      LOOP AT lt_cols INTO lv_fname.
-        CLEAR ls_scol.
-        ls_scol-fname     = lv_fname.
-        ls_scol-color-col = 6.
-        ls_scol-color-int = 0.
-        ls_scol-color-inv = 0.
-        APPEND ls_scol TO lt_scol.
-      ENDLOOP.
-    ELSEIF <upload_flag> IS ASSIGNED AND <upload_flag> = 'X'.
-      LOOP AT lt_cols INTO lv_fname.
-        CLEAR ls_scol.
-        ls_scol-fname     = lv_fname.
-        ls_scol-color-col = 5.
-        ls_scol-color-int = 0.
-        ls_scol-color-inv = 0.
-        APPEND ls_scol TO lt_scol.
-      ENDLOOP.
-    ENDIF.
-
-    <row_color> = lt_scol.
-  ENDLOOP.
+      CLEAR lt_scol.
+      IF <valid_flag> IS ASSIGNED AND <valid_flag> IS INITIAL.
+        LOOP AT lt_cols INTO lv_fname.
+          CLEAR ls_scol.
+          ls_scol-fname     = lv_fname.
+          ls_scol-color-col = 6. " Đỏ
+          ls_scol-color-int = 0. ls_scol-color-inv = 0.
+          APPEND ls_scol TO lt_scol.
+        ENDLOOP.
+      ELSEIF <upload_flag> IS ASSIGNED AND <upload_flag> = 'X'.
+        LOOP AT lt_cols INTO lv_fname.
+          CLEAR ls_scol.
+          ls_scol-fname     = lv_fname.
+          ls_scol-color-col = 5. " Xanh
+          ls_scol-color-int = 0. ls_scol-color-inv = 0.
+          APPEND ls_scol TO lt_scol.
+        ENDLOOP.
+      ENDIF.
+      <row_color> = lt_scol.
+    ENDLOOP.
+  ENDIF.
 
   " 3) Đẩy xuống frontend & refresh
   PERFORM dedup_fieldcat.
@@ -2768,6 +2776,26 @@ FORM apply_editability_and_push.
     ENDTRY.
     g_alv_grid->refresh_table_display(
       EXPORTING is_stable = VALUE lvc_s_stbl( row = 'X' col = 'X' ) ).
+  ENDIF.
+ENDFORM.
+
+"---------------------------------------------------------------------
+" Helper FORM để thêm style NO_F4 gọn gàng
+"---------------------------------------------------------------------
+FORM add_style_no_f4 USING iv_fieldname TYPE lvc_fname
+                     CHANGING ct_celltab TYPE lvc_t_styl.
+  FIELD-SYMBOLS <styl> TYPE lvc_s_styl.
+  DATA ls_new TYPE lvc_s_styl.
+
+  READ TABLE ct_celltab ASSIGNING <styl> WITH KEY fieldname = iv_fieldname.
+  IF sy-subrc = 0.
+    " Đã có style (ví dụ Disabled), cộng thêm NO_F4
+    <styl>-style = <styl>-style + cl_gui_alv_grid=>mc_style_f4_no.
+  ELSE.
+    " Chưa có style, thêm mới
+    ls_new-fieldname = iv_fieldname.
+    ls_new-style     = cl_gui_alv_grid=>mc_style_f4_no.
+    INSERT ls_new INTO TABLE ct_celltab.
   ENDIF.
 ENDFORM.
 
@@ -2816,15 +2844,29 @@ ENDFORM.
 
 FORM build_excluding_toolbar.
   CLEAR gt_tb_excl.
-  " Nút thao tác cục bộ trên lưới
-  APPEND cl_gui_alv_grid=>mc_fc_loc_insert_row TO gt_tb_excl.
-  APPEND cl_gui_alv_grid=>mc_fc_loc_delete_row TO gt_tb_excl.
-  APPEND cl_gui_alv_grid=>mc_fc_loc_append_row  TO gt_tb_excl.
-  APPEND cl_gui_alv_grid=>mc_fc_loc_copy_row    TO gt_tb_excl.
-  APPEND cl_gui_alv_grid=>mc_fc_loc_copy       TO gt_tb_excl.
-  APPEND cl_gui_alv_grid=>mc_fc_loc_paste      TO gt_tb_excl.
-  APPEND cl_gui_alv_grid=>mc_fc_loc_cut        TO gt_tb_excl.
-  APPEND cl_gui_alv_grid=>mc_fc_loc_undo       TO gt_tb_excl.
+
+  " === 1. Nhóm thao tác dòng (Edit) ===
+  " Ẩn vì bạn đã có nút ADD và DELE riêng
+  APPEND cl_gui_alv_grid=>mc_fc_loc_insert_row TO gt_tb_excl. " Chèn dòng
+  APPEND cl_gui_alv_grid=>mc_fc_loc_delete_row TO gt_tb_excl. " Xóa dòng
+  APPEND cl_gui_alv_grid=>mc_fc_loc_append_row TO gt_tb_excl. " Thêm dòng cuối
+  APPEND cl_gui_alv_grid=>mc_fc_loc_copy_row   TO gt_tb_excl. " Copy dòng
+  APPEND cl_gui_alv_grid=>mc_fc_loc_copy       TO gt_tb_excl. " Copy (Ctrl+C)
+  APPEND cl_gui_alv_grid=>mc_fc_loc_paste      TO gt_tb_excl. " Paste (Ctrl+V)
+  APPEND cl_gui_alv_grid=>mc_fc_loc_cut        TO gt_tb_excl. " Cut (Ctrl+X)
+  APPEND cl_gui_alv_grid=>mc_fc_loc_undo       TO gt_tb_excl. " Undo
+
+  " === 2. Nhóm tiện ích chuẩn (Export/Print/View) ===
+  " Ẩn vì bạn đã có nút Export Excel / Template riêng
+  APPEND cl_gui_alv_grid=>mc_mb_export         TO gt_tb_excl. " Menu Export chuẩn
+  APPEND cl_gui_alv_grid=>mc_mb_view           TO gt_tb_excl. " Menu Views (Excel in place)
+  APPEND cl_gui_alv_grid=>mc_fc_print          TO gt_tb_excl. " Nút Print
+  APPEND cl_gui_alv_grid=>mc_fc_graph          TO gt_tb_excl. " Đồ thị
+  APPEND cl_gui_alv_grid=>mc_fc_info           TO gt_tb_excl. " Nút Info (chữ i)
+
+  " === 3. Các nút khác (nếu muốn ẩn nốt) ===
+  " APPEND cl_gui_alv_grid=>mc_fc_check          TO gt_tb_excl. " Nút Check (cái icon cái cân)
+  " APPEND cl_gui_alv_grid=>mc_fc_refresh        TO gt_tb_excl. " Nút Refresh
 
 ENDFORM.
 
@@ -8109,9 +8151,9 @@ FORM fallback_audit_fields CHANGING cs_row TYPE any.
   ENDIF.
 
   " Luôn fill Changed* nếu trống (vì vừa load từ DB)
-  IF <aedat> IS ASSIGNED AND <aedat> IS INITIAL. <aedat> = lv_date. ENDIF.
-  IF <aetim> IS ASSIGNED AND <aetim> IS INITIAL. <aetim> = lv_time. ENDIF.
-  IF <aenam> IS ASSIGNED AND <aenam> IS INITIAL. <aenam> = sy-uname. ENDIF.
+IF <erdat> IS ASSIGNED AND <erdat> IS INITIAL. <erdat> = lv_date. ENDIF.
+  IF <ertim> IS ASSIGNED AND <ertim> IS INITIAL. <ertim> = lv_time. ENDIF.
+  IF <ernam> IS ASSIGNED AND <ernam> IS INITIAL. <ernam> = sy-uname. ENDIF.
 
 ENDFORM.
 
