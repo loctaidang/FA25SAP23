@@ -247,6 +247,7 @@ FORM f4_tabname.
   ENDIF.
 ENDFORM.
 
+
 *----------------------------------------------------------------------*
 *  Include: ZFA25SAP23_AUTH
 *----------------------------------------------------------------------*
@@ -354,7 +355,6 @@ FORM unlock_current_table USING iv_tab TYPE tabname.
       tabname = iv_tab.
 
 ENDFORM.
-
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_DDIC
@@ -876,6 +876,7 @@ FORM add_fc_tech_if_missing USING iv_field  TYPE lvc_fname
     APPEND gs_fieldcat TO gt_fieldcat.
   ENDIF.
 ENDFORM.
+
 
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_ALV
@@ -4746,6 +4747,7 @@ FORM show_upload_error_log USING ut_error_log TYPE STANDARD TABLE.
   ENDTRY.
 ENDFORM.
 
+
 *&---------------------------------------------------------------------*
 *& Include ZFA25SAP23_AUDIT (classic-syntax, no templates/inline)
 *&---------------------------------------------------------------------*
@@ -7706,7 +7708,6 @@ FORM show_validation_log.
   ENDTRY.
 ENDFORM.
 
-
 "===== ZFA25SAP23_DB =====
 
 " Tạo itab động dựa trên tên bảng
@@ -8478,7 +8479,6 @@ FORM fallback_audit_fields CHANGING cs_row TYPE any.
   "IF <ernam> IS ASSIGNED AND <ernam> IS INITIAL. <ernam> = sy-uname. ENDIF.
 
 ENDFORM.
-
 
 "===== ZFA25SAP23_MAIN =====
 
